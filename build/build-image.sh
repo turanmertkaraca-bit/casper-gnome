@@ -93,11 +93,31 @@ fi
 KERNEL_DIR="${KERNEL_DIR:-$REPO/kernel/out}"
 if [ -f "$KERNEL_DIR/bzImage" ]; then
     info "installing custom kernel"
+    KVER=$(strings "$KERNEL_DIR/bzImage" 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+[^ ]*$' | head -1)
+    [ -n "$KVER" ] || KVER="6.12.0"
     mkdir -p "$ROOT/boot"
-    cp "$KERNEL_DIR/bzImage" "$ROOT/boot/vmlinuz-casper"
-    [ -d "$KERNEL_DIR/modules/lib" ] && cp -a "$KERNEL_DIR/modules/lib" "$ROOT/"
-    chroot "$ROOT" /bin/sh -c 'depmod -a 2>/dev/null || true'
-    ok "custom kernel installed"
+    cp "$KERNEL_DIR/bzImage" "$ROOT/boot/vmlinuz-$KVER"
+
+    # Install modules the way the kernel itself does, not with a raw cp -a:
+    # Debian's /lib is a SYMLINK to /usr/lib, so 'cp -a src/lib $ROOT/' fails
+    # with "cannot overwrite non-directory". Resolve it and copy the contents.
+    if [ -d "$KERNEL_DIR/modules/lib/modules" ]; then
+        MODDEST="$ROOT/usr/lib/modules"
+        # If /lib -> usr/lib, usr/lib is the real home. Otherwise use /lib.
+        if [ -L "$ROOT/lib" ]; then
+            MODDEST="$ROOT/$(readlink -f "$ROOT/lib" | sed "s|^$ROOT/||")/modules"
+        else
+            MODDEST="$ROOT/lib/modules"
+        fi
+        mkdir -p "$MODDEST"
+        cp -a "$KERNEL_DIR/modules/lib/modules/." "$MODDEST/"
+        ok "modules installed to ${MODDEST#$ROOT}"
+    else
+        info "no modules directory alongside bzImage — kernel built without modules?"
+    fi
+
+    chroot "$ROOT" /bin/sh -c "depmod -a $KVER 2>/dev/null || true"
+    ok "custom kernel $KVER installed"
 else
     info "no custom kernel at $KERNEL_DIR — using the Debian kernel"
     info "(CONFIG_EFI_MIXED is set in Debian's amd64 config, so 32-bit UEFI still works)"

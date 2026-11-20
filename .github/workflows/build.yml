@@ -93,12 +93,20 @@ jobs:
 
       - name: Collect artifacts
         run: |
-          mkdir -p out
-          cp linux-6.12/arch/x86/boot/bzImage out/
-          cp linux-6.12/.config out/config-6.12-casper-gnome
+          set -e
           mkdir -p out/modules
-          cd linux-6.12 && make ARCH=x86_64 INSTALL_MOD_PATH="$PWD/../out/modules" modules_install
-          cd .. && find out -name '*.ko' | wc -l
+          cp linux-6.12/arch/x86/boot/bzImage out/bzImage
+          cp linux-6.12/.config out/config-6.12-casper-gnome
+          # INSTALL_MOD_PATH must be the parent of lib/modules so the tree
+          # lands at out/modules/lib/modules/<ver>/, which is the layout
+          # build-image.sh expects.
+          cd linux-6.12
+          make ARCH=x86_64 INSTALL_MOD_PATH="$GITHUB_WORKSPACE/out/modules" modules_install
+          cd ..
+          N=$(find out/modules -name '*.ko' | wc -l)
+          echo "installed $N modules"
+          test "$N" -gt 0 || { echo "::error::no modules installed"; exit 1; }
+          find out/modules -name 'mma8452.ko' -o -name 'r8723bs.ko' | head
 
       - uses: actions/upload-artifact@v4
         with:
