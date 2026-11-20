@@ -254,7 +254,14 @@ parted -s "$OUT" set 1 esp on
 parted -s "$OUT" mkpart root ext4 513MiB 100%
 
 LOOP=$(losetup -f --show -P "$OUT")
-trap 'umount "$WORK/esp" "$WORK/root" 2>/dev/null || true; losetup -d "$LOOP" 2>/dev/null || true' EXIT
+cleanup_all() {
+    for m in "$WORK/mnt/sys" "$WORK/mnt/proc" "$WORK/mnt/dev/pts" "$WORK/mnt/dev" \
+             "$WORK/mnt/boot/efi" "$WORK/esp" "$WORK/mnt"; do
+        umount "$m" 2>/dev/null || true
+    done
+    losetup -d "$LOOP" 2>/dev/null || true
+}
+trap cleanup_all EXIT
 mkfs.vfat -F32 -n CASPER_ESP "${LOOP}p1" >/dev/null
 mkfs.ext4 -q -L casper-root "${LOOP}p2"
 
@@ -273,6 +280,16 @@ mount "${LOOP}p1" "$WORK/esp"
 mkdir -p "$WORK/mnt/boot/efi"
 mount --bind "$WORK/esp" "$WORK/mnt/boot/efi"
 
+# grub-install inspects /dev and /proc (it probes block devices and reads
+# /proc/self/mountinfo), so those must be available INSIDE the chroot. Without
+# them it fails with "cannot find a device for /boot/efi (is /dev mounted?)",
+# which reads like a partitioning problem and is not.
+info "bind-mounting /dev, /proc, /sys for grub-install"
+for fs in dev dev/pts proc sys; do
+    mkdir -p "$WORK/mnt/$fs"
+    mount --bind "/$fs" "$WORK/mnt/$fs" 2>/dev/null || true
+done
+
 chroot "$WORK/mnt" /bin/sh -c '
     set -e
     grub-install --target=i386-efi --efi-directory=/boot/efi \
@@ -280,7 +297,14 @@ chroot "$WORK/mnt" /bin/sh -c '
     grub-install --target=i386-efi --efi-directory=/boot/efi \
         --bootloader-id=CasperOS --boot-directory=/boot --no-nvram
     update-grub
-' || die "grub-install failed"
+' || GRUB_FAILED=1
+
+# Unmount the bind mounts before anything else, in reverse order.
+for fs in sys proc dev/pts dev; do
+    umount "$WORK/mnt/$fs" 2>/dev/null || true
+done
+
+[ "${GRUB_FAILED:-0}" = 0 ] || die "grub-install failed (see the error above)"
 
 # Hard check: the IA32 binary must exist. A 64-bit-only ESP would boot on a PC
 # and black-screen on this tablet.
