@@ -1,0 +1,233 @@
+name: casper-gnome
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  kernel:
+    name: Kernel 6.12 (Bay Trail + IIO sensor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential bc bison flex libssl-dev libelf-dev xz-utils \
+            dwarves cpio python3 rsync gcc-13
+          # GCC 13, not the default: GCC 15 defaults to C23 where bool/true/false
+          # are keywords, and Linux 6.12's freestanding EFI stub (which
+          # CONFIG_EFI_MIXED requires) defines them as an enum and a typedef.
+          gcc-13 --version | head -1
+
+      - name: Fetch kernel source
+        run: |
+          set -e
+          curl -fL --retry 3 -o linux-6.12.tar.xz \
+            https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.tar.xz
+          tar -xf linux-6.12.tar.xz
+          echo "KVER=6.12" >> "$GITHUB_ENV"
+
+      - name: Merge config fragment
+        run: |
+          set -e
+          cd linux-6.12
+          make ARCH=x86_64 defconfig
+          ../build/merge-config.sh .config ../kernel/casper-gnome.fragment > .config.merged
+          mv .config.merged .config
+          make ARCH=x86_64 olddefconfig
+
+      - name: Assert required symbols survived resolution
+        run: |
+          set -e
+          cd linux-6.12
+          FAIL=0
+          chk() {
+            if grep -qE "^$1$" .config; then echo "OK   $1"; else
+              echo "::error::$1 missing ($2)"; FAIL=1; fi
+          }
+          # Boot chain: 32-bit firmware on a 64-bit CPU.
+          chk 'CONFIG_EFI_MIXED=y'      'IA32 firmware cannot enter the kernel'
+          chk 'CONFIG_EFI_STUB=y'       'needed with EFI_MIXED'
+          # Graphics (Gen7).
+          chk 'CONFIG_DRM_I915=y'       'no graphics at all'
+          # Audio: without this the tablet is silent.
+          chk 'CONFIG_SND_SOC_INTEL_BYTCR_RT5640_MACH=y' 'no RT5640 audio'
+          # Wi-Fi: module-only by Kconfig design.
+          chk 'CONFIG_RTL8723BS=m'      'no Wi-Fi (device has no Ethernet)'
+          chk 'CONFIG_CFG80211=m'       'RTL8723BS dependency'
+          chk 'CONFIG_WLAN=y'           'RTL8723BS dependency'
+          # Memory.
+          chk 'CONFIG_ZRAM=y'           'no compressed swap on a 2 GB device'
+          # Sensor. IIO is REQUIRED: drivers/iio/accel/Kconfig is sourced
+          # inside 'if IIO' and MMA8452 does not select IIO, so without it the
+          # MMA8452 symbol is invisible and the driver cannot build.
+          chk 'CONFIG_IIO=y'            'MMA8452 is invisible without IIO'
+          chk 'CONFIG_MMA8452=m'        'no accelerometer driver'
+          exit $FAIL
+
+      - name: Build bzImage and modules
+        run: |
+          set -e
+          cd linux-6.12
+          ./scripts/config --disable MODULE_SIG --disable DEBUG_INFO --disable WERROR
+          make ARCH=x86_64 olddefconfig
+          make ARCH=x86_64 -j"$(nproc)" CC=gcc-13 HOSTCC=gcc-13 bzImage modules
+          file arch/x86/boot/bzImage | tee /tmp/kf.txt
+          # bzImage is NOT an ELF, so 'file | grep x86-64' fails on a good build.
+          # Assert the EFI handoff entry points instead: both must be present, and
+          # the 32-bit one is what proves EFI_MIXED is active.
+          grep -q '64-bit EFI handoff entry point' /tmp/kf.txt \
+            || { echo "::error::no 64-bit EFI handoff entry"; exit 1; }
+          grep -q '32-bit EFI handoff entry point' /tmp/kf.txt \
+            || { echo "::error::no 32-bit EFI handoff entry — EFI_MIXED inactive"; exit 1; }
+          find . -path '*mma8452.ko' | grep -q . \
+            || { echo "::error::mma8452.ko was not built"; exit 1; }
+          find . -path '*rtl8723bs/r8723bs.ko' | grep -q . \
+            || { echo "::error::r8723bs.ko was not built (note the name: r8723bs, not rtl8723bs)"; exit 1; }
+          echo "kernel OK: mixed-mode EFI, mma8452.ko and r8723bs.ko present"
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          cp linux-6.12/arch/x86/boot/bzImage out/
+          cp linux-6.12/.config out/config-6.12-casper-gnome
+          mkdir -p out/modules
+          cd linux-6.12 && make ARCH=x86_64 INSTALL_MOD_PATH="$PWD/../out/modules" modules_install
+          cd .. && find out -name '*.ko' | wc -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: casper-kernel
+          path: out/
+
+  rebuild:
+    name: Rebuilt mutter + gnome-shell (-O3 -march=silvermont)
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    timeout-minutes: 120
+    steps:
+      - name: Install build tooling
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            build-essential devscripts equivs quilt dpkg-dev ca-certificates \
+            wget curl git python3
+
+      - uses: actions/checkout@v4
+
+      - name: Fetch Debian source
+        run: |
+          set -e
+          # gnome-shell is u2, not plain 48.7 — getting this wrong applies the
+          # patch series to a different tree than intended.
+          echo "deb-src http://deb.debian.org/debian trixie main" > /etc/apt/sources.list.d/src.list
+          apt-get update -qq
+          cd /tmp
+          apt-get source mutter gnome-shell
+          ls -d /tmp/mutter-* /tmp/gnome-shell-* 2>/dev/null
+
+      - name: Apply CasperOS patches
+        run: |
+          set -e
+          if [ -d patch ] && [ -f patch/series ]; then
+            cd /tmp/gnome-shell-*
+            for p in $(grep -vE '^\s*(#|$)' "$GITHUB_WORKSPACE/patch/series"); do
+              echo "applying $p"
+              patch -p1 --forward < "$GITHUB_WORKSPACE/patch/$p" \
+                || { echo "::error::patch $p failed to apply"; exit 1; }
+            done
+          else
+            echo "no patch series present; building unpatched"
+          fi
+
+      - name: Build with Silvermont flags
+        run: |
+          set -e
+          export DEB_CFLAGS_SET="-O3 -march=silvermont -pipe -fno-plt"
+          export DEB_CXXFLAGS_SET="-O3 -march=silvermont -pipe -fno-plt"
+          # Verify the flag is even accepted before a 20-minute build.
+          echo 'int main(void){return 0;}' > /tmp/t.c
+          gcc -march=silvermont -O3 -c /tmp/t.c -o /tmp/t.o \
+            || { echo "::error::-march=silvermont not accepted by this gcc"; exit 1; }
+          cd /tmp/mutter-*
+          mk-build-deps -i -r -t 'apt-get -y -o Debug::pkgProblemResolver=yes --no-install-recommends' debian/control
+          dpkg-buildpackage -b -uc -us -j"$(nproc)"
+          cd /tmp/gnome-shell-*
+          mk-build-deps -i -r -t 'apt-get -y -o Debug::pkgProblemResolver=yes --no-install-recommends' debian/control
+          dpkg-buildpackage -b -uc -us -j"$(nproc)"
+
+      - name: Verify the flags actually took effect
+        run: |
+          set -e
+          LIB=$(find /tmp -name 'libmutter-16.so.0*' | head -1)
+          [ -n "$LIB" ] || { echo "::error::rebuilt libmutter not found"; exit 1; }
+          echo "checking $LIB"
+          # Silvermont has no AVX. A correctly targeted build must not emit it.
+          AVX=$(objdump -d "$LIB" | grep -c '\bavx\b' || true)
+          echo "avx instruction lines: $AVX"
+          [ "$AVX" -eq 0 ] || { echo "::error::AVX present — -march=silvermont did not apply"; exit 1; }
+          readelf -p .comment "$LIB" | head -5
+
+      - name: Collect debs
+        run: |
+          mkdir -p outdebs
+          cp /tmp/*.deb outdebs/ 2>/dev/null || true
+          ls -la outdebs/ | head -20
+          [ -n "$(ls -A outdebs)" ] || { echo "::error::no .debs produced"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rebuilt-debs
+          path: outdebs/
+
+  image:
+    name: GNOME image (32-bit UEFI boot verified)
+    needs: [kernel]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tooling
+        run: |
+          set -e
+          sudo apt-get update -qq -o Acquire::Retries=5 || sudo apt-get update -qq
+          for i in 1 2 3; do
+            if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                 -o Acquire::Retries=5 mmdebstrap debootstrap parted dosfstools \
+                 e2fsprogs mtools grub-efi-ia32-bin grub2-common \
+                 qemu-system-x86 ovmf socat python3 xz-utils; then break; fi
+            echo "attempt $i failed"; sleep $((i*20))
+          done
+          for t in mmdebstrap parted mkfs.vfat grub-install qemu-system-x86_64; do
+            command -v "$t" >/dev/null || { echo "::error::$t missing"; exit 1; }
+          done
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: casper-kernel
+          path: kernel/out
+
+      - name: Build the image
+        run: |
+          # mmdebstrap needs root for correct ownership and device nodes.
+          sudo -E ./build/build-image.sh --out /tmp/casper-gnome.img --size 6G
+
+      - name: Boot it under 32-bit UEFI (the real check)
+        run: |
+          sudo ./test/boot-test.sh --img /tmp/casper-gnome.img --wait 240
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: casper-gnome-image
+          path: |
+            /tmp/casper-gnome.img
+            /tmp/casper-gnome-boot/*.ppm
+            /tmp/casper-gnome-boot/serial.log
+          if-no-files-found: warn

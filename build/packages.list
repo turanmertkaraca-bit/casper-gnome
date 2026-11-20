@@ -1,0 +1,155 @@
+# CasperOS GNOME — minimal package set for a 2 GB Bay Trail tablet
+#
+# Deliberately NOT the `gnome` or `gnome-core` metapackage: gnome-core pulls
+# 2,035 MiB across 973 packages (measured from the trixie Packages index), and
+# `gnome` adds LibreOffice and Firefox via Recommends for another ~1.8 GiB.
+#
+# Hard dependency facts that constrain this list (measured):
+#   gnome-shell           Depends: gnome-settings-daemon (>= 47~rc)
+#                                  gnome-control-center (>= 1:46)
+#   xdg-desktop-portal-gnome Depends: nautilus (>= 47~beta)
+#   nautilus              Depends: localsearch
+# So gsd, control-center and nautilus are NOT optional. Everything else is.
+
+# ── base ─────────────────────────────────────────────────────────────────
+systemd
+systemd-sysv
+udev
+kmod
+util-linux
+e2fsprogs
+mount
+bash
+coreutils
+debconf
+apt
+ca-certificates
+locales
+tzdata
+sudo
+less
+nano
+curl
+wget
+rsync
+file
+psmisc
+procps
+iproute2
+usbutils
+pciutils
+console-setup
+keyboard-configuration
+efibootmgr
+gdisk
+cloud-guest-utils
+    # cloud-guest-utils provides growpart, used by casper-growroot
+
+# ── kernel ───────────────────────────────────────────────────────────────
+# Firmware for RTL8723BS (Wi-Fi), Intel SST audio (RT5640), i915 on Gen7.
+linux-image-amd64
+initramfs-tools
+# NOTE: firmware-realtek and firmware-intel-sound live in non-free-firmware,
+# not main. The mmdebstrap invocation includes that component explicitly —
+# without it the RT5640 has no DSP firmware and the tablet boots silent.
+firmware-realtek
+firmware-intel-sound
+firmware-linux-free
+zstd
+    # zstd: faster initramfs decompress, less to read off eMMC
+
+# ── bootloader: IA32 is mandatory on Bay Trail ───────────────────────────
+grub-efi-ia32-bin
+grub-efi-ia32
+grub2-common
+grub-common
+plymouth
+plymouth-themes
+
+# ── GNOME Shell desktop ──────────────────────────────────────────────────
+gnome-shell
+gnome-session
+gnome-session-bin
+gnome-settings-daemon
+gnome-control-center
+mutter
+libmutter-16-0
+gjs
+    # gnome-shell depends on gcc + gsd + mutter, so these are explicit only
+    # for clarity; they would be pulled in anyway.
+
+# session plumbing
+greetd
+    # greetd: tiny session launcher, no GDM (GDM is a large GNOME service).
+    # No elogin: Debian trixie has elogind, not elogin, and on a systemd system
+    # it is not needed at all.
+
+# portals
+xdg-desktop-portal
+xdg-desktop-portal-gnome
+xdg-desktop-portal-gtk
+    # portal-gnome pulls nautilus by hard Depends; unavoidable
+
+# files
+nautilus
+    # forced by the portal anyway; keep it rather than fight the dep tree
+
+# terminal + basic apps (the tablet needs SOME way to do things)
+gnome-terminal
+gnome-text-editor
+gnome-calculator
+file-roller
+loupe
+    # loupe: image viewer, 8.3 MiB — drop if space is tight
+
+# on-screen keyboard + touch
+squeekboard
+    # touch typing on a tablet with no keyboard
+
+# sensors + rotation
+iio-sensor-proxy
+    # consumes /sys/bus/iio and drives GNOME rotation (see docs/sensors-mma8653.md)
+
+# audio
+pipewire
+pipewire-pulse
+wireplumber
+alsa-ucm-conf
+    # UCM profile for bytcr-rt5640; the ALSA profile name will not match the
+    # kernel's card name without it (bytcr-rt5640 vs bytcrrt5640)
+
+# networking
+network-manager
+wpasupplicant
+iw
+rfkill
+
+# fonts + theme (needed for a usable UI)
+fonts-inter
+fonts-dejavu-core
+adwaita-icon-theme
+gnome-themes-extra-data
+
+# ── tooling for diagnostics ──────────────────────────────────────────────
+i2c-tools
+evtest
+    # i2c-tools: i2cdetect for the accelerometer bring-up
+    # evtest: verify the touchscreen reports events
+
+# deliberatively ABSENT, and why:
+#
+#   tracker / localsearch  — indexing every file is constant eMMC I/O, which is
+#                            the worst possible load on this tablet. BUT nautilus
+#                            hard-depends on localsearch, so it comes in anyway.
+#                            Mitigation: mask tracker-miner services after
+#                            install rather than removing the package.
+#   gnome-software         — 7.1 MiB + a resident PackageKit stack
+#   evolution-data-server  — only a Recommends of gnome-shell; remove the daemon
+#   gnome-user-docs        — 71.1 MiB of documentation
+#   evince/papers, cheese, shotwell, rhythmbox, totem, gnome-maps,
+#   gnome-weather, gnome-tour, gnome-boxes, seahorse, simple-scan,
+#   gnome-system-monitor, baobab, yelp, orca
+#                          — each a few MiB and none needed for a working desktop
+#   libreoffice*, firefox-esr — pulled only by the `gnome` metapackage Recommend
+#   mesa-vulkan-drivers    — 79.2 MiB; Gen7 Vulkan is the unmaintained `hasvk`
+#                            and GNOME Shell does not use it (Clutter/GLES2)

@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+# Build a minimal GNOME 48 image for the Casper Nirvana N220/N240.
+#
+# Target: Bay Trail Z3735F, 2 GB RAM, 32-bit UEFI on a 64-bit CPU, 1366x768.
+# Desktop: GNOME Shell 48 with animations INTACT — the tuning here removes
+# wasted work, not motion. See docs/research/ for the full reasoning.
+#
+# This builds a partitioned disk image: FAT32 ESP + ext4 root, IA32 GRUB at
+# both the removable and vendor paths (many Bay Trail firmwares only boot one).
+#
+# Usage: sudo ./build-image.sh --out /tmp/casper.img --size 6G
+#
+# Requires root: mmdebstrap needs it for correct file ownership and device nodes.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+
+OUT="/tmp/casper-gnome.img"
+SIZE="6G"
+WORK=""
+DEB_DIR=""          # optional: directory of rebuilt mutter/gnome-shell debs
+SUITE="trixie"
+ARCH="amd64"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out)   OUT="$2"; shift 2 ;;
+        --size)  SIZE="$2"; shift 2 ;;
+        --work)  WORK="$2"; shift 2 ;;
+        --debs)  DEB_DIR="$2"; shift 2 ;;
+        --suite) SUITE="$2"; shift 2 ;;
+        -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+die()  { printf '\n\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
+ok()   { printf '\033[32mOK\033[0m %s\n' "$*"; }
+
+[ "$(id -u)" = 0 ] || die "must run as root (mmdebstrap needs it)"
+
+WORK="${WORK:-$(mktemp -d)}"
+mkdir -p "$WORK"
+ROOT="$WORK/root"
+info "work: $WORK"
+
+for t in mmdebstrap parted mkfs.vfat mkfs.ext4 losetup; do
+    command -v "$t" >/dev/null || die "$t not found"
+done
+
+# ── 1. rootfs ─────────────────────────────────────────────────────────────
+# No metapackage. gnome-shell hard-depends on gnome-settings-daemon and
+# gnome-control-center, and xdg-desktop-portal-gnome hard-depends on nautilus,
+# so those come in regardless — but everything else is chosen deliberately.
+PKGS="$(grep -vE '^\s*(#|$)' "$REPO/build/packages.list" | tr '\n' ',' | sed 's/,$//')"
+info "building rootfs ($SUITE/$ARCH)"
+mmdebstrap \
+    --variant=minbase \
+    --architectures="$ARCH" \
+    --include="$PKGS" \
+    --components=main,contrib,non-free-firmware \
+    --aptopt='Acquire::Retries "5"' \
+    "$SUITE" "$ROOT" \
+    "deb http://deb.debian.org/debian $SUITE main contrib non-free-firmware" \
+    >"$WORK/mmdebstrap.log" 2>&1 \
+    || { tail -40 "$WORK/mmdebstrap.log" >&2; die "mmdebstrap failed"; }
+ok "rootfs: $(du -sh "$ROOT" | cut -f1)"
+
+# ── 2. optional rebuilt packages ─────────────────────────────────────────
+if [ -n "$DEB_DIR" ] && ls "$DEB_DIR"/*.deb >/dev/null 2>&1; then
+    info "installing rebuilt debs from $DEB_DIR"
+    cp "$DEB_DIR"/*.deb "$ROOT/tmp/"
+    chroot "$ROOT" /bin/sh -c 'apt-get install -y --no-install-recommends /tmp/*.deb' \
+        || die "failed to install rebuilt debs"
+    ok "rebuilt mutter/gnome-shell installed"
+fi
+
+# ── 3. kernel + initramfs ────────────────────────────────────────────────
+# The kernel is built separately (see .github/workflows/build.yml, job
+# 'kernel') and dropped in here, because the stock Debian kernel does not
+# carry CONFIG_EFI_MIXED guarantees or our Bay Trail options.
+KERNEL_DIR="${KERNEL_DIR:-$REPO/kernel/out}"
+if [ -f "$KERNEL_DIR/bzImage" ]; then
+    info "installing custom kernel"
+    mkdir -p "$ROOT/boot"
+    cp "$KERNEL_DIR/bzImage" "$ROOT/boot/vmlinuz-casper"
+    [ -d "$KERNEL_DIR/modules/lib" ] && cp -a "$KERNEL_DIR/modules/lib" "$ROOT/"
+    chroot "$ROOT" /bin/sh -c 'depmod -a 2>/dev/null || true'
+    ok "custom kernel installed"
+else
+    info "no custom kernel at $KERNEL_DIR — using the Debian kernel"
+    info "(CONFIG_EFI_MIXED is set in Debian's amd64 config, so 32-bit UEFI still works)"
+fi
+
+# ── 4. session: greetd -> gnome ──────────────────────────────────────────
+info "configuring the session"
+mkdir -p "$ROOT/etc/greetd"
+cat > "$ROOT/etc/greetd/config.toml" <<'EOF'
+# Autologin straight into GNOME. This tablet has one user and no password
+# (disclosed in the README); a greeter would be theatre.
+[terminal]
+vt = 1
+
+[default_session]
+command = "gnome-session"
+user = "lvy"
+EOF
+
+# The user. No password: this is a single-user tablet and the existing image
+# already discloses this. SSH, if enabled, is key-only (see below).
+chroot "$ROOT" /bin/sh -c '
+    id lvy >/dev/null 2>&1 || useradd -m -s /bin/bash lvy
+    passwd -d lvy
+    for g in audio video input render netdev bluetooth; do
+        getent group "$g" >/dev/null && usermod -aG "$g" lvy
+    done
+    echo "lvy ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-lvy
+    chmod 440 /etc/sudoers.d/90-lvy
+' || die "user setup failed"
+
+# ── 5. kernel cmdline ────────────────────────────────────────────────────
+# See docs/research/kernel-gpu-params.md — every entry is justified there, and
+# parameters that do NOT exist in 6.12 are deliberately absent.
+CMDLINE="quiet splash"
+CMDLINE="$CMDLINE intel_idle.max_cstate=1"          # touchscreen freeze (LPSS I2C gating)
+CMDLINE="$CMDLINE i915.enable_psr=0 i915.enable_dc=0"  # avoid Gen7 display stalls
+# i915.enable_fbc is deliberately ABSENT: it may recover real bandwidth on a
+# bandwidth-sensitive workload, but it caused flicker on this panel before.
+# Test it as an experiment (see the research doc), do not ship it blind.
+CMDLINE="$CMDLINE mitigations=off"                   # documented Silvermont win; personal tablet
+CMDLINE="$CMDLINE nowatchdog transparent_hugepage=never"
+# Serial console left on: if the graphical session fails, this is the only
+# way to find out why without a working screen.
+CMDLINE="$CMDLINE console=ttyS0,115200"
+
+mkdir -p "$ROOT/etc/default/grub.d"
+cat > "$ROOT/etc/default/grub.d/99-casper.cfg" <<EOF
+GRUB_TIMEOUT_STYLE=hidden
+GRUB_TIMEOUT=1
+GRUB_DISABLE_OS_PROBER=true
+GRUB_CMDLINE_LINUX_DEFAULT="$CMDLINE"
+EOF
+
+# ── 6. tuning ────────────────────────────────────────────────────────────
+info "applying tuning"
+mkdir -p "$ROOT/etc/sysctl.d"
+cat > "$ROOT/etc/sysctl.d/99-casper.conf" <<'EOF'
+# zram-backed swap is RAM, so swap eagerly. The usual "swappiness=10" advice is
+# for disk swap and would waste the entire benefit here.
+vm.swappiness=180
+vm.page-cluster=0
+# eMMC has poor random-write behaviour; flush earlier and smaller.
+vm.dirty_ratio=20
+vm.dirty_background_ratio=5
+EOF
+
+cat > "$ROOT/etc/default/zramswap" <<'EOF'
+ALGO=lz4
+SIZE=2048
+PRIORITY=100
+EOF
+
+# systemd-oomd, not earlyoom: it acts on cgroup pressure, so it can kill a
+# whole runaway scope instead of guessing at individual PIDs and possibly
+# picking the compositor.
+mkdir -p "$ROOT/etc/systemd/system/user@.service.d"
+cat > "$ROOT/etc/systemd/system/user@.service.d/oomd.conf" <<'EOF'
+[Service]
+ManagedOOMMemoryPressure=kill
+ManagedOOMMemoryPressureLimit=50%
+EOF
+
+# Animations stay ON. This is the whole point of the project.
+# Only the wasted per-frame work is removed, and that lives in the patched
+# shell, not in a user setting.
+mkdir -p "$ROOT/etc/dconf/db/local.d"
+cat > "$ROOT/etc/dconf/db/local.d/00-casper" <<'EOF'
+[org/gnome/desktop/interface]
+# Keep animations. Do not add 'enable-animations=false' here.
+clock-show-seconds=false
+
+[org/gnome/shell]
+# Fewer workspaces to composite.
+dynamic-workspaces=true
+EOF
+chroot "$ROOT" /bin/sh -c 'command -v dconf >/dev/null && dconf update || true'
+
+# ── 7. recovery path ─────────────────────────────────────────────────────
+# With GNOME as the ONLY session, a compositor that fails to start means a
+# black screen and no way back. This gives a shell on tty2.
+info "installing recovery console"
+cat > "$ROOT/etc/systemd/system/casper-recovery.service" <<'EOF'
+[Unit]
+Description=CasperOS recovery shell on tty2
+After=systemd-user-sessions.service
+# Only starts if the graphical session did not come up within 60s.
+ConditionPathExists=!/run/casper-session-up
+[Service]
+Type=simple
+ExecStart=/sbin/agetty --autologin root --noclear tty2 linux
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+chroot "$ROOT" /bin/sh -c 'systemctl enable casper-recovery.service 2>/dev/null || true'
+
+# ── 8. disk image ────────────────────────────────────────────────────────
+info "creating disk image ($SIZE)"
+rm -f "$OUT"
+truncate -s "$SIZE" "$OUT"
+parted -s "$OUT" mklabel gpt
+parted -s "$OUT" mkpart ESP fat32 1MiB 513MiB
+parted -s "$OUT" set 1 esp on
+parted -s "$OUT" mkpart root ext4 513MiB 100%
+
+LOOP=$(losetup -f --show -P "$OUT")
+trap 'umount "$WORK/esp" "$WORK/root" 2>/dev/null || true; losetup -d "$LOOP" 2>/dev/null || true' EXIT
+mkfs.vfat -F32 -n CASPER_ESP "${LOOP}p1" >/dev/null
+mkfs.ext4 -q -L casper-root "${LOOP}p2"
+
+mkdir -p "$WORK/esp" "$WORK/mnt"
+mount "${LOOP}p2" "$WORK/mnt"
+info "copying rootfs"
+cp -a "$ROOT/." "$WORK/mnt/"
+ok "root filesystem copied"
+
+# ── 9. bootloader ────────────────────────────────────────────────────────
+# 32-bit UEFI is MANDATORY: Bay Trail firmware is IA32-only even though the CPU
+# is x86_64. Install at BOTH paths because many Bay Trail firmwares mishandle
+# NVRAM boot entries and only try the removable path.
+info "installing IA32 GRUB"
+mount "${LOOP}p1" "$WORK/esp"
+mkdir -p "$WORK/mnt/boot/efi"
+mount --bind "$WORK/esp" "$WORK/mnt/boot/efi"
+
+chroot "$WORK/mnt" /bin/sh -c '
+    set -e
+    grub-install --target=i386-efi --efi-directory=/boot/efi \
+        --bootloader-id=CasperOS --boot-directory=/boot --removable --no-nvram
+    grub-install --target=i386-efi --efi-directory=/boot/efi \
+        --bootloader-id=CasperOS --boot-directory=/boot --no-nvram
+    update-grub
+' || die "grub-install failed"
+
+# Hard check: the IA32 binary must exist. A 64-bit-only ESP would boot on a PC
+# and black-screen on this tablet.
+if [ -f "$WORK/esp/EFI/BOOT/BOOTIA32.EFI" ]; then
+    ok "BOOTIA32.EFI present ($(stat -c %s "$WORK/esp/EFI/BOOT/BOOTIA32.EFI") bytes)"
+else
+    die "BOOTIA32.EFI missing — this image would NOT boot on the tablet"
+fi
+
+# ── 10. grow root to fill the eMMC on first boot ─────────────────────────
+mkdir -p "$WORK/mnt/etc/systemd/system"
+cat > "$WORK/mnt/etc/systemd/system/casper-growroot.service" <<'EOF'
+[Unit]
+Description=Grow root partition to fill the device
+After=local-fs.target
+Before=multi-user.target
+ConditionPathExists=!/etc/casper-growroot-done
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/casper-growroot
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+EOF
+cat > "$WORK/mnt/usr/local/bin/casper-growroot" <<'EOF'
+#!/bin/sh
+set -e
+ROOTDEV=$(findmnt -no SOURCE /)
+DISK=$(lsblk -no PKNAME "$ROOTDEV")
+PARTNUM=$(cat /sys/class/block/$(basename "$ROOTDEV")/partition)
+growpart "/dev/$DISK" "$PARTNUM" || true
+resize2fs "$ROOTDEV" || true
+touch /etc/casper-growroot-done
+EOF
+chmod +x "$WORK/mnt/usr/local/bin/casper-growroot"
+chroot "$WORK/mnt" /bin/sh -c 'systemctl enable casper-growroot.service 2>/dev/null || true'
+
+sync
+umount "$WORK/mnt/boot/efi" "$WORK/esp" "$WORK/mnt"
+losetup -d "$LOOP"
+trap - EXIT
+
+ok "image: $OUT ($(du -h "$OUT" | cut -f1))"
+echo
+echo "Verify with:"
+echo "  ./test/boot-test.sh --img $OUT"
+echo
+echo "NOTE: this image autologins with no password and has passwordless sudo."
+echo "      Do not put it on a network you do not control."
