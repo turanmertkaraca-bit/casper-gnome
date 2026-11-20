@@ -1,0 +1,23 @@
+diff --git a/js/ui/background.js b/js/ui/background.js
+index cee38f7..ced6885 100644
+--- a/js/ui/background.js
++++ b/js/ui/background.js
+@@ -797,11 +797,16 @@ export class BackgroundManager extends Signals.EventEmitter {
+             x_expand: !this._useContentSize,
+             y_expand: !this._useContentSize,
+         });
++        // CasperOS: the vignette's radial shader is a second full-screen pass
++        // over the wallpaper, and `brightness` of 0.5 forces a per-fragment
++        // multiply on top of it. The wallpaper is already dark on this device,
++        // so the darkening adds cost without visible benefit. Keep the actor,
++        // drop the extra shading.
+         backgroundActor.content.set({
+             background,
+-            vignette: this._vignette,
++            vignette: false,
+             vignette_sharpness: 0.5,
+-            brightness: 0.5,
++            brightness: 1.0,
+         });
+ 
+         this._container.add_child(backgroundActor);

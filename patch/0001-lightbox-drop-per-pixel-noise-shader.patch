@@ -1,0 +1,34 @@
+diff --git a/js/ui/lightbox.js b/js/ui/lightbox.js
+index 5ba9eeb..f45f782 100644
+--- a/js/ui/lightbox.js
++++ b/js/ui/lightbox.js
+@@ -10,12 +10,14 @@ export const DEFAULT_FADE_FACTOR = 0.4;
+ export const VIGNETTE_BRIGHTNESS = 0.5;
+ export const VIGNETTE_SHARPNESS = 0.7;
+ 
++// CasperOS: the per-pixel dither noise added by |rand()| costs a sin() and a
++// fract() per fragment across the whole screen. Its purpose is to hide
++// banding in the darkening gradient; on a 4-EU GPU that fragment work is a
++// measurable share of the full-screen pass, and the banding it hides is not
++// visible on this panel. The vignette darkening itself is kept unchanged.
+ const VIGNETTE_DECLARATIONS = '                                              \
+ uniform float brightness;                                                  \n\
+-uniform float vignette_sharpness;                                          \n\
+-float rand(vec2 p) {                                                       \n\
+-  return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453123);        \n\
+-}                                                                          \n';
++uniform float vignette_sharpness;                                          \n';
+ 
+ const VIGNETTE_CODE = '                                                      \
+ cogl_color_out.a = cogl_color_in.a;                                        \n\
+@@ -23,9 +25,7 @@ cogl_color_out.rgb = vec3(0.0, 0.0, 0.0);                                  \n\
+ vec2 position = cogl_tex_coord_in[0].xy - 0.5;                             \n\
+ float t = clamp(length(1.41421 * position), 0.0, 1.0);                     \n\
+ float pixel_brightness = mix(1.0, 1.0 - vignette_sharpness, t);            \n\
+-cogl_color_out.a *= 1.0 - pixel_brightness * brightness;                   \n\
+-float noise_magnitude = (2.0 / ((1.0 - cogl_color_out.a) * 255.0));        \n\
+-cogl_color_out.a += (rand(position) - 0.5) * noise_magnitude;              \n';
++cogl_color_out.a *= 1.0 - pixel_brightness * brightness;                   \n';
+ 
+ 
+ const RadialShaderEffect = GObject.registerClass({
