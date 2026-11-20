@@ -56,16 +56,25 @@ done
 # so those come in regardless — but everything else is chosen deliberately.
 PKGS="$(grep -vE '^\s*(#|$)' "$REPO/build/packages.list" | tr '\n' ',' | sed 's/,$//')"
 info "building rootfs ($SUITE/$ARCH)"
+# mmdebstrap builds its own apt keyring inside the target and does not inherit
+# the host's trust state, so it needs --keyring explicitly. Without this it
+# fails immediately with "The repository ... is not signed" — which looks like
+# a network or mirror problem but is not.
+KEYRING=/usr/share/keyrings/debian-archive-keyring.gpg
+[ -f "$KEYRING" ] || die "missing $KEYRING (apt install debian-archive-keyring)"
+
 mmdebstrap \
     --variant=minbase \
     --architectures="$ARCH" \
     --include="$PKGS" \
     --components=main,contrib,non-free-firmware \
+    --keyring="$KEYRING" \
     --aptopt='Acquire::Retries "5"' \
+    --aptopt='Acquire::Check-Valid-Until "false"' \
     "$SUITE" "$ROOT" \
     "deb http://deb.debian.org/debian $SUITE main contrib non-free-firmware" \
     >"$WORK/mmdebstrap.log" 2>&1 \
-    || { tail -40 "$WORK/mmdebstrap.log" >&2; die "mmdebstrap failed"; }
+    || { tail -40 "$WORK/mmdebstrap.log" >&2; die "mmdebstrap failed (see log above)"; }
 ok "rootfs: $(du -sh "$ROOT" | cut -f1)"
 
 # ── 2. optional rebuilt packages ─────────────────────────────────────────

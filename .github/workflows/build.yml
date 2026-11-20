@@ -201,7 +201,8 @@ jobs:
             if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
                  -o Acquire::Retries=5 mmdebstrap debootstrap parted dosfstools \
                  e2fsprogs mtools grub-efi-ia32-bin grub2-common \
-                 qemu-system-x86 ovmf socat python3 xz-utils; then break; fi
+                 debian-archive-keyring qemu-system-x86 ovmf socat \
+                 python3 xz-utils; then break; fi
             echo "attempt $i failed"; sleep $((i*20))
           done
           for t in mmdebstrap parted mkfs.vfat grub-install qemu-system-x86_64; do

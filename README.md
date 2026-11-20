@@ -119,6 +119,10 @@ they were obvious:
 ## Status
 
 **Verified in this environment:**
+- **The kernel builds.** CI passes every assertion: `EFI_MIXED`, RT5640 audio,
+  RTL8723BS Wi-Fi, zram, and the new `IIO`+`MMA8452` pair, with
+  `LD [M] drivers/staging/rtl8723bs/r8723bs.ko` and
+  `drivers/iio/accel/mma8452.ko` both produced and installed.
 - Both patches apply cleanly to gnome-shell 48.7 and produce valid GLSL.
 - All 76 kernel config symbols resolve in the real 6.12 Kconfig tree.
 - Every package in `packages.list` exists in trixie (main or non-free-firmware).
