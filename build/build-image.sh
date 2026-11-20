@@ -93,8 +93,17 @@ fi
 KERNEL_DIR="${KERNEL_DIR:-$REPO/kernel/out}"
 if [ -f "$KERNEL_DIR/bzImage" ]; then
     info "installing custom kernel"
-    KVER=$(strings "$KERNEL_DIR/bzImage" 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+[^ ]*$' | head -1)
+    # Determine the kernel version. `strings | grep` exits non-zero when it
+    # finds nothing, which under `set -e` aborts the script silently — so the
+    # whole pipeline is guarded and there is a real fallback.
+    KVER=$( { strings "$KERNEL_DIR/bzImage" 2>/dev/null \
+              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[a-z0-9.+-]*' \
+              | head -1; } || true )
+    if [ -z "$KVER" ] && [ -d "$KERNEL_DIR/modules/lib/modules" ]; then
+        KVER=$(ls "$KERNEL_DIR/modules/lib/modules" 2>/dev/null | head -1 || true)
+    fi
     [ -n "$KVER" ] || KVER="6.12.0"
+    info "kernel version: $KVER"
     mkdir -p "$ROOT/boot"
     cp "$KERNEL_DIR/bzImage" "$ROOT/boot/vmlinuz-$KVER"
 
