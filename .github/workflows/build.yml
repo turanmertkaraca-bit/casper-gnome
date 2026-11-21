@@ -222,6 +222,17 @@ jobs:
           name: casper-kernel
           path: kernel/out
 
+      - name: Lint the build script (heredocs, syntax)
+        run: |
+          # An unterminated heredoc silently absorbs the rest of the script, so
+          # a whole stage disappears and the failure surfaces somewhere
+          # unrelated with a shifting line number. That cost four CI runs and
+          # three wrong diagnoses; check for it explicitly and cheaply.
+          bash -n build/build-image.sh
+          ./test/check-heredocs.sh build/build-image.sh
+          bash -n test/boot-test.sh
+          echo "shell lint OK"
+
       - name: Build the image
         run: |
           # mmdebstrap needs root for correct ownership and device nodes.

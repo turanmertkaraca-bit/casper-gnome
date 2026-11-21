@@ -436,15 +436,10 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-# Write the growroot helper through $ROOT (the built rootfs), not $WORK/mnt.
-# This section runs after grub-install, and $WORK/mnt/usr is where the ESP was
-# bind-mounted over boot/efi — writing into the live mount has proven fragile
-# ("No such file or directory" even after mkdir -p succeeded, most likely
-# because /usr/local is a symlink under Debian's usrmerge). $ROOT is a plain
-# directory tree, so writing there is unambiguous — but it must happen BEFORE
-# the cp -a. Since it now happens after, copy the two files in explicitly.
-mkdir -p "$ROOT/usr/local/bin" "$ROOT/etc/systemd/system"
-cat > "$ROOT/usr/local/bin/casper-growroot" <<'EOF'
+# The mount is verified healthy above (findmnt reports ext4 rw), so write the
+# helper straight into the image. This used to mirror through $ROOT, which
+# failed because the file lived in $WORK/mnt and never in $ROOT.
+install -D -m 0755 /dev/stdin "$WORK/mnt/usr/local/bin/casper-growroot" <<'SH'
 #!/bin/sh
 set -e
 ROOTDEV=$(findmnt -no SOURCE /)
@@ -453,34 +448,11 @@ PARTNUM=$(cat /sys/class/block/$(basename "$ROOTDEV")/partition)
 growpart "/dev/$DISK" "$PARTNUM" || true
 resize2fs "$ROOTDEV" || true
 touch /etc/casper-growroot-done
-EOF
-chmod +x "$ROOT/usr/local/bin/casper-growroot"
-
-# Diagnose the mount and path before writing. Three builds failed at this exact
-# spot with ENOENT from a redirect even though mkdir -p had just run, and the
-# usual explanations (usrmerge symlink, unmounted target) do not fit. Print the
-# facts so the next failure is self-explaining rather than another guess.
-info "verifying the mounted image before writing helpers"
-{
-    echo "  findmnt mnt:      $(findmnt -T "$WORK/mnt" -no TARGET,SOURCE,FSTYPE,OPTIONS 2>&1)"
-    echo "  findmnt usr:      $(findmnt -T "$WORK/mnt/usr" -no TARGET,SOURCE,FSTYPE 2>&1)"
-    echo "  findmnt local:    $(findmnt -T "$WORK/mnt/usr/local" -no TARGET,SOURCE,FSTYPE 2>&1)"
-    echo "  stat /usr:        $(stat -c '%F' "$WORK/mnt/usr" 2>&1)"
-    echo "  stat /usr/local:  $(stat -c '%F %N' "$WORK/mnt/usr/local" 2>&1)"
-    echo "  stat /usr/local/bin: $(stat -c '%F %N' "$WORK/mnt/usr/local/bin" 2>&1)"
-    echo "  readlink bin:     $(readlink -f "$WORK/mnt/usr/local/bin" 2>&1)"
-} | tee -a "$WORK/mountdiag.txt"
-
-# Mirror both growroot files into the mounted image. Use install(1) so a missing
-# or symlinked destination cannot silently swallow the file, and verify.
-install -D -m 0755 "$ROOT/usr/local/bin/casper-growroot" \
-    "$WORK/mnt/usr/local/bin/casper-growroot" \
-    || die "could not install casper-growroot into the image"
-install -D -m 0644 "$ROOT/etc/systemd/system/casper-growroot.service" \
-    "$WORK/mnt/etc/systemd/system/casper-growroot.service" \
-    || die "could not install casper-growroot.service into the image"
+SH
 [ -x "$WORK/mnt/usr/local/bin/casper-growroot" ] \
-    || die "casper-growroot is missing from the image after install"
+    || die "casper-growroot missing from the image after install"
+[ -f "$WORK/mnt/etc/systemd/system/casper-growroot.service" ] \
+    || die "casper-growroot.service missing from the image"
 ok "growroot helper installed"
 chroot "$WORK/mnt" /bin/sh -c 'systemctl enable casper-growroot.service 2>/dev/null || true'
 
