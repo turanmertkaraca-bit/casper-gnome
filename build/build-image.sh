@@ -134,17 +134,52 @@ fi
 
 # ── 4. session: greetd -> gnome ──────────────────────────────────────────
 info "configuring the session"
-mkdir -p "$ROOT/etc/greetd"
+mkdir -p "$ROOT/etc/greetd" "$ROOT/usr/local/bin"
+
+# XDG_SESSION_TYPE MUST be set explicitly. greetd does not set it, and
+# pam_systemd derives it from PAM_TTY (= tty1) and exports "tty". mutter then
+# rejects the session with "Unsupported session type" and gnome-shell exits,
+# so the screen stays blank even with logind healthy. GDM does this for you;
+# greetd does not. The wrapper is also where the Wayland-specific environment
+# belongs, so the greeter config stays trivial.
+cat > "$ROOT/usr/local/bin/casper-session" <<'EOF'
+#!/bin/sh
+# Launch GNOME as a Wayland session under greetd.
+set -e
+export XDG_SESSION_TYPE=wayland
+export XDG_SESSION_DESKTOP=GNOME
+export XDG_CURRENT_DESKTOP=GNOME
+export XDG_SESSION_CLASS=user
+# greetd sets XDG_RUNTIME_DIR for the session, but be defensive: without it
+# mutter cannot create its socket and will exit immediately.
+[ -n "$XDG_RUNTIME_DIR" ] || export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+exec gnome-session
+EOF
+chmod +x "$ROOT/usr/local/bin/casper-session"
+
 cat > "$ROOT/etc/greetd/config.toml" <<'EOF'
 # Autologin straight into GNOME. This tablet has one user and no password
 # (disclosed in the README); a greeter would be theatre.
 [terminal]
 vt = 1
 
+# greetd's config has two halves:
+#   [default_session] = the GREETER (what runs before login)
+#   [initial_session] = the session to start automatically at boot
+# Putting gnome-session in [default_session] means it is treated as the
+# greeter, which sits under greetd-greeter and never gets a proper user
+# session. Autologin belongs in [initial_session].
 [default_session]
-command = "gnome-session"
+command = "agreety --cmd /bin/sh"
+user = "greeter"
+
+[initial_session]
+command = "/usr/local/bin/casper-session"
 user = "lvy"
 EOF
+
+# greetd requires the greeter user to exist.
+chroot "$ROOT" /bin/sh -c 'id greeter >/dev/null 2>&1 || useradd -r -s /sbin/nologin greeter' || true
 
 # The user. No password: this is a single-user tablet and the existing image
 # already discloses this. SSH, if enabled, is key-only (see below).
@@ -295,6 +330,33 @@ mkfs.ext4 -q -L casper-root "${LOOP}p2"
 
 mkdir -p "$WORK/esp" "$WORK/mnt"
 mount "${LOOP}p2" "$WORK/mnt"
+# Run systemd's own finalisation steps. mmdebstrap does not boot an init, so
+# some post-install work that a normal install gets for free may be missing:
+# systemd-sysusers creates the system accounts (messagebus, systemd-network,
+# etc.), and systemd-machine-id-setup writes a valid 32-hex machine-id.
+# dbus.service runs as user messagebus; if that account is absent, dbus fails,
+# logind cannot reach the system bus, logind fails, and NO graphical session
+# can ever start. That chain is invisible in the logs unless you know it.
+info "running systemd finalisation (sysusers, machine-id)"
+for cmd in systemd-sysusers systemd-machine-id-setup; do
+    if chroot "$ROOT" sh -c "command -v $cmd >/dev/null 2>&1"; then
+        chroot "$ROOT" "$cmd" >/dev/null 2>&1 && ok "$cmd" \
+            || info "  $cmd returned nonzero (usually harmless)"
+    else
+        info "  $cmd not present"
+    fi
+done
+
+# Hard check: without this account dbus cannot start and everything downstream
+# fails. Fail the build rather than ship an image that cannot show a desktop.
+if chroot "$ROOT" getent passwd messagebus >/dev/null 2>&1; then
+    ok "messagebus user exists"
+else
+    die "the 'messagebus' user is missing — dbus.service cannot start, which
+means systemd-logind fails and no graphical session can start.
+This usually means systemd-sysusers did not run during the rootfs build."
+fi
+
 info "copying rootfs"
 # cp -a is used deliberately for the payload, but systemd state that must not
 # be inherited is regenerated below — copying a built rootfs wholesale carries
