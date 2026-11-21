@@ -253,10 +253,14 @@ Description=Dump systemd-logind failure details to the console
 After=systemd-logind.service
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'if ! systemctl is-active --quiet systemd-logind; then echo "=== CASPER: logind failed ==="; systemctl status systemd-logind --no-pager -l 2>&1 | head -30; journalctl -u systemd-logind -n 30 --no-pager 2>&1; ls -la /run/dbus /var/lib/systemd 2>&1 | head -20; fi'
+# Output must go to /dev/console explicitly: a oneshot service's stdout lands
+# in the journal, not on the serial console, which is why the first version of
+# this unit produced nothing in the boot log.
+StandardOutput=file:/dev/console
+StandardError=file:/dev/console
+ExecStart=/bin/sh -c 'echo "=== CASPER DIAG START ==="; systemctl is-active systemd-logind || true; systemctl status systemd-logind --no-pager -l 2>&1 | head -25; echo "--- journal ---"; journalctl -u systemd-logind -n 30 --no-pager 2>&1; echo "--- binary/pam ---"; ls -la /usr/lib/systemd/systemd-logind /etc/pam.d/systemd-user 2>&1; echo "--- dbus ---"; systemctl is-active dbus 2>&1; ls -la /run/dbus/system_bus_socket 2>&1; echo "=== CASPER DIAG END ==="'
 [Install]
 WantedBy=multi-user.target
-EOF
 chroot "$ROOT" /bin/sh -c 'systemctl enable casper-logind-diag.service 2>/dev/null || true'
 
 # ── 8. disk image ────────────────────────────────────────────────────────
