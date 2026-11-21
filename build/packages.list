@@ -14,6 +14,13 @@
 # ── base ─────────────────────────────────────────────────────────────────
 systemd
 systemd-sysv
+# dbus is REQUIRED and is NOT a dependency of systemd. systemd-logind talks to
+# the system bus; without dbus installed, logind fails to start, and because
+# logind owns seats and sessions, no graphical session can ever start. This is
+# exactly what broke the first bootable image: the kernel and systemd came up
+# cleanly, then logind failed in a loop and the screen stayed blank.
+dbus
+libpam-systemd
 udev
 kmod
 util-linux
@@ -123,6 +130,24 @@ network-manager
 wpasupplicant
 iw
 rfkill
+
+# graphics + session essentials that a desktop cannot start without
+libgl1-mesa-dri
+# crocus lives here: the OpenGL driver for Gen7. Without it the compositor
+# cannot get a GL context and gnome-shell refuses to start.
+libegl-mesa0
+libgles2
+# mutter 48 requires GLESv2 (it errors at configure time without it upstream);
+# the runtime equivalent must be present too.
+xwayland
+# needed unless mutter is rebuilt with -Dxwayland=false; X11 apps otherwise
+# silently fail to appear
+libinput10
+# touchscreen + touchpad input through the compositor
+upower
+# gnome-shell shows a battery indicator and gsd-power wants it
+accountsservice
+# gnome-shell uses it for the user menu
 
 # fonts + theme (needed for a usable UI)
 fonts-inter
