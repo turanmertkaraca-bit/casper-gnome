@@ -176,10 +176,69 @@ if grep -aq "Exception Type" "$OUT/serial.log" 2>/dev/null; then
 problem, not evidence about the image. A secboot image needs -machine q35,smm=on."
 fi
 
+# ── verdict ───────────────────────────────────────────────────────────────
+#
+# Serial is the PRIMARY evidence, not the framebuffer. This is deliberate:
+# the image boots with `quiet splash` plus plymouth, so the framebuffer is
+# blank by design until the graphical session draws, and the kernel console
+# is on ttyS0. Judging by pixels alone reported a perfectly good boot as a
+# failure — the same class of mistake made earlier in this project with a
+# dark GRUB menu. Serial output proves the kernel and userspace actually ran.
+SERIAL_LOG="$OUT/serial.log"
+
+has() { grep -aqE "$1" "$SERIAL_LOG" 2>/dev/null; }
+SER_BYTES=$( [ -f "$SERIAL_LOG" ] && stat -c %s "$SERIAL_LOG" || echo 0 )
+echo "serial: $SER_BYTES bytes"
+
+if has "Exception Type"; then
+    printf '\033[31mFIRMWARE FAULT\033[0m: %s\n' "$(grep -a -m1 'Exception Type' "$SERIAL_LOG")"
+    die "the IA32 firmware crashed before loading anything. Test-environment
+problem, not evidence about the image (a secboot image needs smm=on)."
+fi
+
+have_kernel=0
+has 'Linux version [0-9]' && have_kernel=1
+have_userspace=0
+has 'Reached target|Started .*service|systemd\[1\]' && have_userspace=1
+
+# Did the graphical session actually come up? These are the markers that
+# matter for a desktop image.
+have_graphical=0
+if has 'Started .*gnome|gnome-shell|org\.gnome\.Shell|Reached target graphical\.target'; then
+    have_graphical=1
+fi
+
+echo "kernel=${have_kernel} userspace=${have_userspace} graphical=${have_graphical}"
+
 KIND=$(echo "$RESULT" | sed -n 's/.*kind=\([a-z-]*\).*/\1/p')
+
+if [ "$have_kernel" = 1 ] && [ "$have_userspace" = 1 ]; then
+    ok "kernel booted and systemd reached userspace"
+    if [ "$have_graphical" = 1 ]; then
+        ok "graphical session started"
+        echo
+        echo "RESULT: 32-bit UEFI -> kernel -> systemd -> GNOME session."
+        exit 0
+    fi
+    echo
+    echo "RESULT: 32-bit UEFI -> kernel -> systemd userspace CONFIRMED."
+    echo "        The graphical session did not start within ${WAIT}s."
+    echo "        This is real progress but NOT a working desktop — check the"
+    echo "        serial log for gnome-shell or greetd failures."
+    exit 3
+fi
+
+if [ "$have_kernel" = 1 ]; then
+    ok "kernel booted, but userspace did not start"
+    echo "RESULT: partial — kernel OK, init failed. See $SERIAL_LOG."
+    exit 3
+fi
+
 case "$KIND" in
-    rich-ui)   ok "full graphical UI rendered"; echo "RESULT: boot chain works, GNOME rendered."; exit 0 ;;
-    graphical) ok "graphical content rendered ($KIND)"; echo "RESULT: boot chain works."; exit 0 ;;
-    early)     ok "some content rendered but not a full UI"; echo "RESULT: inconclusive — check serial."; exit 3 ;;
-    *)         die "framebuffer blank — the image did not render anything." 1 ;;
+    rich-ui|graphical)
+        ok "graphical content on the framebuffer ($KIND)"
+        echo "RESULT: something rendered, but no kernel banner on serial."
+        exit 3 ;;
+    *)
+        die "no kernel boot and nothing rendered — the image did not boot." 1 ;;
 esac
