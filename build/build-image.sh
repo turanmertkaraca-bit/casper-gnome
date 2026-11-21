@@ -244,6 +244,21 @@ WantedBy=multi-user.target
 EOF
 chroot "$ROOT" /bin/sh -c 'systemctl enable casper-recovery.service 2>/dev/null || true'
 
+# Diagnostic: when logind fails, "Failed to start systemd-logind" is the only
+# clue and it has dozens of causes. Dump the real reason to the serial console
+# so a headless boot test can report it.
+cat > "$ROOT/etc/systemd/system/casper-logind-diag.service" <<'EOF'
+[Unit]
+Description=Dump systemd-logind failure details to the console
+After=systemd-logind.service
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'if ! systemctl is-active --quiet systemd-logind; then echo "=== CASPER: logind failed ==="; systemctl status systemd-logind --no-pager -l 2>&1 | head -30; journalctl -u systemd-logind -n 30 --no-pager 2>&1; ls -la /run/dbus /var/lib/systemd 2>&1 | head -20; fi'
+[Install]
+WantedBy=multi-user.target
+EOF
+chroot "$ROOT" /bin/sh -c 'systemctl enable casper-logind-diag.service 2>/dev/null || true'
+
 # ── 8. disk image ────────────────────────────────────────────────────────
 info "creating disk image ($SIZE)"
 rm -f "$OUT"
@@ -268,8 +283,20 @@ mkfs.ext4 -q -L casper-root "${LOOP}p2"
 mkdir -p "$WORK/esp" "$WORK/mnt"
 mount "${LOOP}p2" "$WORK/mnt"
 info "copying rootfs"
+# cp -a is used deliberately for the payload, but systemd state that must not
+# be inherited is regenerated below — copying a built rootfs wholesale carries
+# over a machine-id and stale dbus state that make systemd-logind fail, which
+# in turn blocks every graphical session (logind owns seats and sessions).
 cp -a "$ROOT/." "$WORK/mnt/"
-ok "root filesystem copied"
+
+# Regenerate identity/state that must be per-device.
+rm -f "$WORK/mnt/etc/machine-id" "$WORK/mnt/var/lib/dbus/machine-id"
+: > "$WORK/mnt/etc/machine-id"
+ln -sf /etc/machine-id "$WORK/mnt/var/lib/dbus/machine-id" 2>/dev/null || true
+rm -rf "$WORK/mnt/var/lib/systemd/linger" 2>/dev/null || true
+rm -f "$WORK/mnt/etc/systemd/system/*.wants/systemd-logind.service" 2>/dev/null || true
+
+ok "root filesystem copied (machine-id reset)"
 
 # ── 9. bootloader ────────────────────────────────────────────────────────
 # 32-bit UEFI is MANDATORY: Bay Trail firmware is IA32-only even though the CPU

@@ -196,8 +196,13 @@ if has "Exception Type"; then
 problem, not evidence about the image (a secboot image needs smm=on)."
 fi
 
+# The image boots with `quiet`, which suppresses the kernel banner, so a
+# missing "Linux version" proves nothing. Any of these means the kernel ran:
+# systemd output, a kernel subsystem message, or the banner itself.
 have_kernel=0
 has 'Linux version [0-9]' && have_kernel=1
+has 'systemd\[1\]|Reached target|Started .*\.service' && have_kernel=1
+has 'amd_pstate|ata[0-9]\.|EXT4-fs|Freeing unused kernel' && have_kernel=1
 have_userspace=0
 has 'Reached target|Started .*service|systemd\[1\]' && have_userspace=1
 
@@ -223,8 +228,15 @@ if [ "$have_kernel" = 1 ] && [ "$have_userspace" = 1 ]; then
     echo
     echo "RESULT: 32-bit UEFI -> kernel -> systemd userspace CONFIRMED."
     echo "        The graphical session did not start within ${WAIT}s."
-    echo "        This is real progress but NOT a working desktop — check the"
-    echo "        serial log for gnome-shell or greetd failures."
+    echo "        This is real progress but NOT a working desktop."
+    # Name the blocker instead of leaving it to guesswork.
+    if has 'systemd-logind'; then
+        echo
+        echo "BLOCKER: systemd-logind failed. logind owns seats and sessions, so"
+        echo "no graphical session can start without it. Serial excerpt:"
+        sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\r/\n/g' "$SERIAL_LOG" \
+            | grep -iE 'logind|CASPER: logind failed' | head -12
+    fi
     exit 3
 fi
 
