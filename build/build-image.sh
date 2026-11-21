@@ -304,6 +304,8 @@ StandardError=file:/dev/console
 ExecStart=/bin/sh -c 'echo "=== CASPER DIAG START ==="; systemctl is-active systemd-logind || true; systemctl status systemd-logind --no-pager -l 2>&1 | head -25; echo "--- journal ---"; journalctl -u systemd-logind -n 30 --no-pager 2>&1; echo "--- binary/pam ---"; ls -la /usr/lib/systemd/systemd-logind /etc/pam.d/systemd-user 2>&1; echo "--- dbus ---"; systemctl is-active dbus 2>&1; ls -la /run/dbus/system_bus_socket 2>&1; echo "=== CASPER DIAG END ==="'
 [Install]
 WantedBy=multi-user.target
+EOF
+
 chroot "$ROOT" systemctl enable casper-logind-diag.service >/dev/null 2>&1 || \
     echo "  (note: could not enable casper-logind-diag.service; continuing)"
 
