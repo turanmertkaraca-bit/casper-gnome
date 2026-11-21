@@ -229,6 +229,7 @@ chroot "$ROOT" /bin/sh -c 'command -v dconf >/dev/null && dconf update || true'
 # With GNOME as the ONLY session, a compositor that fails to start means a
 # black screen and no way back. This gives a shell on tty2.
 info "installing recovery console"
+set -x
 cat > "$ROOT/etc/systemd/system/casper-recovery.service" <<'EOF'
 [Unit]
 Description=CasperOS recovery shell on tty2
@@ -242,7 +243,14 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
-chroot "$ROOT" /bin/sh -c 'systemctl enable casper-recovery.service 2>/dev/null || true'
+# systemctl enable inside a chroot can return nonzero even on success (it warns
+# that systemd is not the running init). Guard it so set -e does not kill the
+# build at this point — this is exactly where the previous run died, right
+# after "installing recovery console".
+chroot "$ROOT" systemctl enable casper-recovery.service >/dev/null 2>&1 || \
+    echo "  (note: could not enable casper-recovery.service; continuing)"
+
+set +x
 
 # Diagnostic: when logind fails, "Failed to start systemd-logind" is the only
 # clue and it has dozens of causes. Dump the real reason to the serial console
@@ -261,7 +269,8 @@ StandardError=file:/dev/console
 ExecStart=/bin/sh -c 'echo "=== CASPER DIAG START ==="; systemctl is-active systemd-logind || true; systemctl status systemd-logind --no-pager -l 2>&1 | head -25; echo "--- journal ---"; journalctl -u systemd-logind -n 30 --no-pager 2>&1; echo "--- binary/pam ---"; ls -la /usr/lib/systemd/systemd-logind /etc/pam.d/systemd-user 2>&1; echo "--- dbus ---"; systemctl is-active dbus 2>&1; ls -la /run/dbus/system_bus_socket 2>&1; echo "=== CASPER DIAG END ==="'
 [Install]
 WantedBy=multi-user.target
-chroot "$ROOT" /bin/sh -c 'systemctl enable casper-logind-diag.service 2>/dev/null || true'
+chroot "$ROOT" systemctl enable casper-logind-diag.service >/dev/null 2>&1 || \
+    echo "  (note: could not enable casper-logind-diag.service; continuing)"
 
 # ── 8. disk image ────────────────────────────────────────────────────────
 info "creating disk image ($SIZE)"
