@@ -355,7 +355,7 @@ else
 fi
 
 # ── 10. grow root to fill the eMMC on first boot ─────────────────────────
-mkdir -p "$WORK/mnt/etc/systemd/system"
+mkdir -p "$WORK/mnt/etc/systemd/system" "$WORK/mnt/usr/local/bin"
 cat > "$WORK/mnt/etc/systemd/system/casper-growroot.service" <<'EOF'
 [Unit]
 Description=Grow root partition to fill the device
