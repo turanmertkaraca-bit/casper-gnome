@@ -203,8 +203,10 @@ mkdir -p "$ROOT/etc/systemd/system"
 ln -sf /usr/lib/systemd/system/greetd.service \
     "$ROOT/etc/systemd/system/display-manager.service"
 
-if [ -e "$ROOT/etc/systemd/system/display-manager.service" ]; then
-    ok "greetd wired as display-manager.service"
+# Test the LINK, not its target: -e would follow the symlink and look for
+# /usr/lib/systemd/system/greetd.service on the HOST, where it does not exist.
+if [ -L "$ROOT/etc/systemd/system/display-manager.service" ]; then
+    ok "greetd wired as display-manager.service -> $(readlink "$ROOT/etc/systemd/system/display-manager.service")"
 else
     die "could not create the display-manager.service alias; no desktop would start"
 fi
