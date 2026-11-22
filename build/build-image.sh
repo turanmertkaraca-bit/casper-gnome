@@ -309,7 +309,52 @@ GRUB_DISABLE_OS_PROBER=true
 GRUB_CMDLINE_LINUX_DEFAULT="$CMDLINE"
 EOF
 
-# ── 6. tuning ────────────────────────────────────────────────────────────
+# ── 6a. install the tuned configs ────────────────────────────────────────
+# These are the hard-won per-device fixes from the earlier CasperOS project:
+# PipeWire/WirePlumber buffers for the RT5640, the ALSA UCM symlink (kernel
+# reports bytcrrt5640, the profile is named bytcr-rt5640 — without it the card
+# appears with no profile and there is no sound at all), the libinput quirk
+# that stops ghost-mouse drags on the touchscreen, the I2C/C-state rules, the
+# touchscreen watchdog, VA-API env, Firefox policies and zram settings.
+#
+# Copying the whole tree is deliberate: these were validated on this exact
+# tablet, and hand-retyping them into a build script is how they get lost.
+CONFIGS="$REPO/configs"
+if [ -d "$CONFIGS" ]; then
+    info "installing tuned configs from $CONFIGS"
+    # -a preserves the UCM symlink, which is load-bearing.
+    cp -a "$CONFIGS/." "$ROOT/"
+    N=$(find "$CONFIGS" -type f | wc -l)
+    ok "$N config files installed"
+else
+    die "configs/ directory missing — audio and touch fixes would not be included"
+fi
+
+# The watchdog and reset helpers must be executable.
+chmod +x "$ROOT"/usr/local/bin/* 2>/dev/null || true
+
+# Enable the units that came with the config set. systemctl enable inside a
+# chroot can return nonzero, so link directly into the right *.wants dir —
+# that is the outcome we actually need and it cannot silently do nothing.
+info "enabling CasperOS services"
+enable_unit() {
+    local unit="$1" target="$2"
+    mkdir -p "$ROOT/etc/systemd/system/$target.wants"
+    ln -sf "/usr/lib/systemd/system/$unit" \
+        "$ROOT/etc/systemd/system/$target.wants/$unit"
+    [ -L "$ROOT/etc/systemd/system/$target.wants/$unit" ] \
+        && ok "  $unit -> $target.wants" \
+        || die "could not enable $unit"
+}
+enable_unit casper-cpu-governor.service        multi-user.target
+enable_unit casper-nvram.service               multi-user.target
+enable_unit casper-touchscreen-watchdog.service graphical.target
+
+# The governor script must exist or the unit fails at boot.
+[ -x "$ROOT/usr/local/bin/casper-set-governor" ] \
+    || die "casper-set-governor missing; the governor unit would fail"
+
+# ── 6b. tuning ───────────────────────────────────────────────────────────
 info "applying tuning"
 mkdir -p "$ROOT/etc/sysctl.d"
 cat > "$ROOT/etc/sysctl.d/99-casper.conf" <<'EOF'

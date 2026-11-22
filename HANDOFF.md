@@ -41,6 +41,14 @@ docs/research/                 all research, each file self-contained:
   gen7-crocus.md                 Mesa/crocus reality (GL 4.2, not 4.6)
   compositor-alternatives.md     honest comparison of other shells
 
+configs/                       ★ the tuned per-device fixes, copied from the
+                               earlier CasperOS project. THIS IS THE AUDIO AND
+                               TOUCH WORK. Pipeline audio buffers, the ALSA UCM
+                               symlink (bytcrrt5640 -> bytcr-rt5640), the
+                               libinput quirk, I2C/C-state udev rules, the
+                               touchscreen watchdog, VA-API env, Firefox
+                               policies, zram. build-image.sh copies the whole
+                               tree in; do not retype these by hand.
 kernel/casper-gnome.fragment   Linux 6.12 config (76 symbols, all verified)
 build/build-image.sh           the image builder  ← most work happens here
 build/packages.list            minimal GNOME package set (all names verified)
