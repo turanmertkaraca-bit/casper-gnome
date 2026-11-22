@@ -208,10 +208,13 @@ has 'Reached target|Started .*service|systemd\[1\]' && have_userspace=1
 
 # Did the graphical session actually come up? These are the markers that
 # matter for a desktop image.
+# A graphical session is only "up" if something actually launched it. Check
+# greetd and gnome-shell specifically, not just graphical.target, because
+# reaching the target can happen with nothing drawing.
 have_graphical=0
-if has 'Started .*gnome|gnome-shell|org\.gnome\.Shell|Reached target graphical\.target'; then
-    have_graphical=1
-fi
+has 'Started greetd|greetd\['                      && have_graphical=1
+has 'Started .*[Gg]nome|gnome-shell|org\.gnome\.Shell' && have_graphical=1
+has 'New seat seat0'                                && have_graphical=1
 
 echo "kernel=${have_kernel} userspace=${have_userspace} graphical=${have_graphical}"
 

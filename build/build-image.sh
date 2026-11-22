@@ -181,6 +181,31 @@ EOF
 # greetd requires the greeter user to exist.
 chroot "$ROOT" /bin/sh -c 'id greeter >/dev/null 2>&1 || useradd -r -s /sbin/nologin greeter' || true
 
+# ENABLE greetd. Configuring it is not enough — it is not enabled by default,
+# and without this the image boots to a text login with no graphical session at
+# all (which is exactly what the serial log showed: logind healthy, greetd
+# never mentioned).
+chroot "$ROOT" systemctl enable greetd.service >/dev/null 2>&1 || \
+    info "  note: could not enable greetd here (will verify below)"
+if [ -e "$ROOT/etc/systemd/system/multi-user.target.wants/greetd.service" ] \
+   || [ -e "$ROOT/etc/systemd/system/display-manager.service" ]; then
+    ok "greetd enabled"
+else
+    # Fall back to a direct symlink; `systemctl enable` needs a working chroot
+    # dbus in some systemd versions and this is the outcome we actually need.
+    mkdir -p "$ROOT/etc/systemd/system/multi-user.target.wants"
+    ln -sf /usr/lib/systemd/system/greetd.service \
+        "$ROOT/etc/systemd/system/multi-user.target.wants/greetd.service"
+    ok "greetd enabled (via symlink)"
+fi
+
+# /usr/share/wayland-sessions/gnome.desktop is what tells the world a Wayland
+# GNOME session exists. gnome-session ships it, but assert it: without it
+# greeter helpers cannot launch the session by name.
+[ -f "$ROOT/usr/share/wayland-sessions/gnome.desktop" ] \
+    && ok "wayland session file present" \
+    || info "  note: no /usr/share/wayland-sessions/gnome.desktop (we launch gnome-session directly)"
+
 # The user. No password: this is a single-user tablet and the existing image
 # already discloses this. SSH, if enabled, is key-only (see below).
 chroot "$ROOT" /bin/sh -c '
