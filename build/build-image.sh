@@ -367,10 +367,28 @@ info "copying rootfs"
 cp -a "$ROOT/." "$WORK/mnt/"
 
 # Regenerate identity/state that must be per-device.
-rm -f "$WORK/mnt/etc/machine-id" "$WORK/mnt/var/lib/dbus/machine-id"
-: > "$WORK/mnt/etc/machine-id"
-ln -sf /etc/machine-id "$WORK/mnt/var/lib/dbus/machine-id" 2>/dev/null || true
-rm -rf "$WORK/mnt/var/lib/systemd/linger" 2>/dev/null || true
+# IMPORTANT: do NOT truncate /etc/machine-id to empty. systemd-machine-id-setup
+# already wrote a valid 32-hex id above; blanking it makes logind fail with
+# status=238/STATE_DIRECTORY, because logind's unit declares
+# StateDirectory=systemd/linger and systemd cannot set up state directories
+# under an uninitialised machine identity. That failure is a restart loop, an
+# invisible dead end, and no graphical session can ever start.
+if ! grep -qE '^[0-9a-f]{32}$' "$WORK/mnt/etc/machine-id" 2>/dev/null; then
+    # Regenerate properly rather than leaving it empty or random-looking.
+    chroot "$ROOT" systemd-machine-id-setup >/dev/null 2>&1 || true
+    cp -f "$ROOT/etc/machine-id" "$WORK/mnt/etc/machine-id" 2>/dev/null || true
+fi
+if grep -qE '^[0-9a-f]{32}$' "$WORK/mnt/etc/machine-id" 2>/dev/null; then
+    ok "machine-id is valid"
+else
+    die "machine-id is missing or invalid; logind will fail with
+status=238/STATE_DIRECTORY and no desktop can start."
+fi
+mkdir -p "$WORK/mnt/var/lib/dbus"
+ln -sf /etc/machine-id "$WORK/mnt/var/lib/dbus/machine-id"
+
+# logind declares StateDirectory=systemd/linger, so these must exist.
+mkdir -p "$WORK/mnt/var/lib/systemd" "$WORK/mnt/var/lib/systemd/linger"
 rm -f "$WORK/mnt/etc/systemd/system/*.wants/systemd-logind.service" 2>/dev/null || true
 
 ok "root filesystem copied (machine-id reset)"
