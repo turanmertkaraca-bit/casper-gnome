@@ -357,7 +357,7 @@ Type=oneshot
 # this unit produced nothing in the boot log.
 StandardOutput=file:/dev/console
 StandardError=file:/dev/console
-ExecStart=/bin/sh -c 'echo "=== CASPER DIAG START ==="; systemctl is-active systemd-logind || true; systemctl status systemd-logind --no-pager -l 2>&1 | head -25; echo "--- journal ---"; journalctl -u systemd-logind -n 30 --no-pager 2>&1; echo "--- binary/pam ---"; ls -la /usr/lib/systemd/systemd-logind /etc/pam.d/systemd-user 2>&1; echo "--- dbus ---"; systemctl is-active dbus 2>&1; ls -la /run/dbus/system_bus_socket 2>&1; echo "=== CASPER DIAG END ==="'
+ExecStart=/bin/sh -c 'echo "=== CASPER DIAG START ==="; echo "--- greetd ---"; ls -la /etc/systemd/system/display-manager.service 2>&1; systemctl status greetd --no-pager -l 2>&1 | head -18; systemctl is-enabled greetd 2>&1; systemctl list-dependencies graphical.target --no-pager 2>&1 | grep -iE "greetd|display-manager" || echo "no greetd in graphical.target deps"; systemctl is-active systemd-logind || true; systemctl status systemd-logind --no-pager -l 2>&1 | head -25; echo "--- journal ---"; journalctl -u systemd-logind -n 30 --no-pager 2>&1; echo "--- binary/pam ---"; ls -la /usr/lib/systemd/systemd-logind /etc/pam.d/systemd-user 2>&1; echo "--- dbus ---"; systemctl is-active dbus 2>&1; ls -la /run/dbus/system_bus_socket 2>&1; echo "=== CASPER DIAG END ==="'
 [Install]
 WantedBy=multi-user.target
 EOF
