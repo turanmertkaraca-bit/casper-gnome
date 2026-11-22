@@ -3,153 +3,100 @@
 A GNOME desktop for a 2014 Bay Trail tablet: **Intel Atom Z3735F, 2 GB RAM,
 32-bit UEFI on a 64-bit CPU, Gen7 graphics, 1366×768**.
 
-The goal is unusual and specific: **keep GNOME and keep its animations**, and
-make it smooth anyway. Not "a light desktop that looks like GNOME" — actual
-GNOME, with the wasted work removed.
+The goal: **keep GNOME and keep its animations**, and make it smooth anyway.
+Not a light desktop that imitates GNOME — actual GNOME with the wasted work
+removed.
 
 ---
 
-## Start here
+## Read this first
 
 | Document | What it answers |
 |---|---|
-| **[`docs/research/verification-audit.md`](docs/research/verification-audit.md)** | Which claims survived source-level re-checking. **Read this first** — it refutes two core assumptions |
-| [`docs/research/bottleneck-verification.md`](docs/research/bottleneck-verification.md) | What actually limits Gen7 compositing, with corrected arithmetic |
+| **[`HANDOFF.md`](HANDOFF.md)** | Start here for continuing the work: state, next step, how to iterate |
+| [`docs/VERIFIED.md`](docs/VERIFIED.md) | Every claim traced to its evidence, plus every bug the checks caught |
+| [`docs/research/verification-audit.md`](docs/research/verification-audit.md) | Which assumptions were **refuted** by source-level checking |
+| [`docs/research/bottleneck-verification.md`](docs/research/bottleneck-verification.md) | What actually limits Gen7 compositing, with arithmetic |
 | [`docs/research/direct-scanout.md`](docs/research/direct-scanout.md) | The biggest available win, verified in mutter source |
-| [`docs/research/kernel-gpu-params.md`](docs/research/kernel-gpu-params.md) | i915 parameters verified against the 6.12 tree, including three that **do not exist** |
-| [`docs/research/gnome-memory.md`](docs/research/gnome-memory.md) | Measured package sizes and what is genuinely removable |
-| [`docs/research/debian-rebuild.md`](docs/research/debian-rebuild.md) | How to rebuild mutter/gnome-shell correctly |
+| [`docs/research/kernel-gpu-params.md`](docs/research/kernel-gpu-params.md) | i915 parameters verified against 6.12, including three that do not exist |
+| [`docs/research/gnome-memory.md`](docs/research/gnome-memory.md) | Measured package sizes; what is genuinely removable |
+| [`docs/research/debian-rebuild.md`](docs/research/debian-rebuild.md) | Rebuilding mutter/gnome-shell correctly |
+| [`docs/research/mutter-build-options.md`](docs/research/mutter-build-options.md) | Every meson option and whether it matters |
+| [`docs/research/shell-frame-hotpaths.md`](docs/research/shell-frame-hotpaths.md) | Where shell frames actually cost |
+| [`docs/research/gen7-crocus.md`](docs/research/gen7-crocus.md) | Mesa/crocus reality on Bay Trail |
+| [`docs/research/compositor-alternatives.md`](docs/research/compositor-alternatives.md) | Honest comparison of other shells |
 | [`docs/sensors-mma8653.md`](docs/sensors-mma8653.md) | Screen rotation: the accelerometer plan |
 
 ---
 
-## The three findings that define this project
+## Project status (as of the handoff)
 
-### 1. GNOME Shell 48 is **not** a GTK4 shell
-
-This was assumed by earlier planning and it is wrong. In the 48.7 source:
-
-- Exactly **one** C file includes `<gtk/gtk.h>` — `src/shell-perf-helper.c`, a
-  test helper.
-- `StWidget` derives from `ClutterActor` (`src/st/st-widget.h:38`).
-- The shell binary's dependency list (`src/meson.build:64-78`, `:282-289`) has
-  **no `gtk_dep`**.
-- **Nothing in `js/ui/` imports Gtk.** GTK4 is used only in three detached,
-  out-of-process dialogs.
-
-**This matters enormously:** Clutter actors composited by mutter are the *cheap*
-path. Any plan to "rewrite the shell in GTK4 for speed" would move work onto a
-heavier path and make things worse.
-
-### 2. Fill rate is not the bottleneck. Nor is bandwidth.
-
-Corrected arithmetic (see `bottleneck-verification.md`):
-
-| Quantity | Value |
+| Piece | State |
 |---|---|
-| Gen7 Bay Trail ROP fill at 646 MHz | ~2.6 Gpx/s |
-| Needed for 1366×768 @ 60 fps | 63 Mpx/s |
-| Headroom | **~40×** |
-| Bandwidth for a full-screen composite @ 60 fps | ~0.5–0.8 GB/s |
-| Available (single-channel DDR3L-1333) | 10.6 GB/s peak |
-| Utilisation | **~9%** |
+| **Kernel 6.12** | **BUILDS, CI green.** `EFI_MIXED`, RT5640 audio, RTL8723BS Wi-Fi, zram, `IIO`+`MMA8452`. `r8723bs.ko` and `mma8452.ko` produced. |
+| **Patched mutter + gnome-shell** | **BUILDS, CI green.** Both CasperOS patches apply to real Debian source; `-O3 -march=silvermont` verified by **0 AVX instructions**. |
+| **Disk image** | **BUILDS and BOOTS.** GPT + FAT32 ESP + ext4, IA32 GRUB at both paths, `BOOTIA32.EFI` present. Reaches systemd userspace. |
+| **Graphical session** | **NOT YET.** greetd does not start; `multi-user.target` stalls. Being worked. |
+| **Hardware** | **UNTOUCHED.** No touchscreen, audio, Wi-Fi or rotation testing has happened. |
 
-An earlier version of this research modelled fill as `px/clk × EU count`. That is
-wrong for Gen7: pixels/clock is set by the shared Windower/Masker, not the EUs.
-
-**So what is slow?** In order: **pass count** (each full-screen shader pass
-re-touches the whole surface), **vsync/page-flip timing** (missing a vblank
-halves the frame rate regardless of draw speed), and CPU/driver overhead in the
-Gallium path.
-
-### 3. Animations are cheap; full-screen *passes* are not
-
-`js/ui/animation.js` is only the spinner. All real animation is `actor.ease()`
-→ Clutter transitions on the compositor timeline. Motion itself costs almost
-nothing.
-
-What costs is what gets **re-drawn across the whole screen**. Two concrete
-culprits, both now patched:
-
-- `js/ui/lightbox.js` ran a per-pixel `rand()` dither (`sin`+`fract` per
-  fragment) to hide banding in the darkening gradient.
-- `js/ui/background.js` ran a radial vignette shader over the wallpaper at
-  `brightness: 0.5`.
+Everything above is measured in CI, not estimated.
 
 ---
 
-## What is in this repo
+## Corrections that shaped this project
 
-```
-kernel/casper-gnome.fragment   Linux 6.12 config: EFI_MIXED, RT5640, RTL8723BS,
-                               zram, and CONFIG_IIO + CONFIG_MMA8452
-patch/0001,0002,series         Verified gnome-shell 48.7 patches
-build/build-image.sh           mmdebstrap -> partitioned GPT image, IA32 GRUB
-build/packages.list            Minimal GNOME set, names verified against trixie
-test/boot-test.sh              QEMU IA32-UEFI boot verification
-test/diag-sensors.sh           Accelerometer diagnostics (run this on the tablet)
-.github/workflows/build.yml    kernel / rebuild / image jobs
-```
+Found by adversarial verification, not obvious in advance:
 
-The two patches were authored against the real 48.7 tree and verified with
-`git apply --check` plus a full apply-and-inspect. They keep every animation.
-
----
-
-## Corrections that were made mid-project
-
-Recording these because they were found by adversarial verification, not because
-they were obvious:
-
-| Claim | Verdict |
+| Assumption | Reality |
 |---|---|
-| "GNOME Shell 48 is GTK4" | **Refuted** — it is Clutter/Mutter actors |
-| "`CONFIG_IIO` is redundant, MMA8452 selects its deps" | **Refuted** — without `CONFIG_IIO` the driver cannot build at all |
-| "Bay Trail gets GL 4.6" | **Refuted** — Gen7.0 is `verx10=70`, gets GL 4.2 |
-| "Fill rate is the bottleneck" | **Refuted** — ~40× headroom |
-| "Bandwidth is the bottleneck" | **Refuted** — ~9% utilisation |
-| "`i915.enable_rc6` is a useful parameter" | **Refuted** — removed in 4.16 |
-| "`i915.fastboot` is a useful parameter" | **Refuted** — removed in 6.7 |
-| "`i915.fifo_underrun_reporting` exists" | **Refuted** — no such parameter |
-| "Mutter 48 requires GLESv2" | **Verified** — fails at *configure* time |
-| "`gnome-shell --force-animations` exists" | **Verified** |
+| "GNOME Shell 48 is GTK4" | **False.** Clutter/Mutter actors; only 3 detached dialogs use GTK4. A GTK4 rewrite would be *slower* |
+| "Fill rate is the bottleneck" | **False.** ~40× headroom |
+| "Memory bandwidth is the bottleneck" | **False.** ~9% utilisation |
+| "`CONFIG_IIO` is redundant" | **False.** The driver cannot build without it |
+| "Bay Trail gets GL 4.6" | **False.** Gen7.0 → GL 4.2 / GLES 3.0 |
+| "`i915.enable_rc6` / `.fastboot` are useful" | **False.** Removed in 4.16 / 6.7 |
+
+Real bottlenecks, ranked: **pass count**, then **vsync/page-flip timing**, then
+Gallium overhead.
 
 ---
 
-## Status
+## What the two patches do
 
-**Verified in this environment:**
-- **The kernel builds.** CI passes every assertion: `EFI_MIXED`, RT5640 audio,
-  RTL8723BS Wi-Fi, zram, and the new `IIO`+`MMA8452` pair, with
-  `LD [M] drivers/staging/rtl8723bs/r8723bs.ko` and
-  `drivers/iio/accel/mma8452.ko` both produced and installed.
-- Both patches apply cleanly to gnome-shell 48.7 and produce valid GLSL.
-- All 76 kernel config symbols resolve in the real 6.12 Kconfig tree.
-- Every package in `packages.list` exists in trixie (main or non-free-firmware).
-- Scripts pass `bash -n`; the diag script runs end to end; the merge script
-  produces no duplicate symbols.
+- `patch/0001-lightbox-drop-per-pixel-noise-shader.patch` — removes the
+  per-pixel `rand()` dither from the lightbox shader, **keeping** the vignette
+  darkening (they share one snippet).
+- `patch/0002-background-drop-vignette-shader.patch` — removes a second
+  full-screen shader pass over the wallpaper.
 
-**Not yet verified — needs CI or the tablet:**
-- The kernel builds (CI job `kernel`).
-- mutter/gnome-shell rebuild with `-march=silvermont` (CI job `rebuild`).
-- The image boots under 32-bit UEFI (CI job `image`).
-- Every hardware item: touchscreen, RT5640 audio, RTL8723BS, rotation.
-- Whether the two patches measurably improve frame times. **They are reasoned,
-  not measured** — this is the honest gap.
+**Animations are untouched in both.** They are reasoned from source, **not yet
+benchmarked** — see `HANDOFF.md` for the measurement that settles it.
 
 ---
 
-## The one experiment that decides the rest
-
-Before more patching, measure. On the tablet:
+## Building
 
 ```bash
-sudo apt install sysprof
-sysprof-cli --capture ...
+# locally (needs root: mmdebstrap)
+sudo ./build/build-image.sh --out /tmp/casper-gnome.img --size 6G
+
+# verify it boots under 32-bit UEFI
+sudo ./test/boot-test.sh --img /tmp/casper-gnome.img
 ```
 
-If frame times are dominated by **pass count**, patching shaders helps.
-If dominated by **vblank misses**, no shader work will fix it and the effort
-belongs in the kernel/display path. The research says it is likely the latter,
-which is why `i915.enable_fbc=1` is flagged as an experiment worth running
-rather than a settled answer.
+CI (`.github/workflows/build.yml`) runs three jobs: `kernel`, `rebuild`, `image`.
+The image job builds the disk and boots it under IA32 OVMF before declaring
+success.
+
+---
+
+## Honest limitations
+
+- **No desktop has been seen yet.** The image boots to systemd; greetd/session
+  startup is the current blocker.
+- **QEMU cannot validate the GPU.** Whether crocus/GL works on real Gen7, and
+  whether the patches help, needs the tablet.
+- **The image autologins with no password and has passwordless sudo.** That is
+  inherited from the original CasperOS design and is fine for a personal
+  single-user tablet, wrong on a shared network.
+- **`mitigations=off`** is set for Silvermont performance. Disclosed, deliberate.
