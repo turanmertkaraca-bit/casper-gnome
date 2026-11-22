@@ -150,9 +150,13 @@ export XDG_SESSION_TYPE=wayland
 export XDG_SESSION_DESKTOP=GNOME
 export XDG_CURRENT_DESKTOP=GNOME
 export XDG_SESSION_CLASS=user
-# greetd sets XDG_RUNTIME_DIR for the session, but be defensive: without it
-# mutter cannot create its socket and will exit immediately.
-[ -n "$XDG_RUNTIME_DIR" ] || export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+# Do NOT fabricate XDG_RUNTIME_DIR. If it is unset, pam_systemd did not
+# register a session and mutter would fail anyway; failing loudly here names
+# the real cause instead of producing a blank screen.
+if [ -z "$XDG_RUNTIME_DIR" ]; then
+    echo "casper-session: XDG_RUNTIME_DIR unset - pam_systemd registered no session" >&2
+    exit 1
+fi
 exec gnome-session
 EOF
 chmod +x "$ROOT/usr/local/bin/casper-session"
@@ -161,7 +165,7 @@ cat > "$ROOT/etc/greetd/config.toml" <<'EOF'
 # Autologin straight into GNOME. This tablet has one user and no password
 # (disclosed in the README); a greeter would be theatre.
 [terminal]
-vt = 1
+vt = 7
 
 # greetd's config has two halves:
 #   [default_session] = the GREETER (what runs before login)
@@ -170,16 +174,21 @@ vt = 1
 # greeter, which sits under greetd-greeter and never gets a proper user
 # session. Autologin belongs in [initial_session].
 [default_session]
-command = "agreety --cmd /bin/sh"
-user = "greeter"
+command = "/usr/sbin/agreety --cmd /bin/sh"
+user = "_greetd"
 
 [initial_session]
 command = "/usr/local/bin/casper-session"
 user = "lvy"
 EOF
 
-# greetd requires the greeter user to exist.
-chroot "$ROOT" /bin/sh -c 'id greeter >/dev/null 2>&1 || useradd -r -s /sbin/nologin greeter' || true
+# greetd resolves default_session.user at startup and EXITS 1 if it is absent,
+# so this must match the config exactly. Debian's greetd package creates
+# _greetd; create it explicitly rather than assuming the postinst ran.
+chroot "$ROOT" /bin/sh -c 'id _greetd >/dev/null 2>&1 || useradd -r -s /sbin/nologin _greetd' || true
+chroot "$ROOT" getent passwd _greetd >/dev/null 2>&1 \
+    && ok "_greetd user exists" \
+    || die "_greetd user missing — greetd exits immediately at startup"
 
 # ENABLE greetd. Configuring it is not enough — without this the image boots to
 # a text login with no graphical session (which is exactly what the serial log
@@ -199,6 +208,15 @@ if [ -e "$ROOT/etc/systemd/system/display-manager.service" ]; then
 else
     die "could not create the display-manager.service alias; no desktop would start"
 fi
+
+# greetd's packaged unit does After=/Conflicts=getty@tty7.service. With vt = 7
+# configured, getty on tty7 must not fight greetd for the VT. Disable it so the
+# greeter actually owns the terminal.
+rm -f "$ROOT/etc/systemd/system/getty.target.wants/getty@tty7.service" 2>/dev/null || true
+rm -f "$ROOT/etc/systemd/system/multi-user.target.wants/getty@tty7.service" 2>/dev/null || true
+# Also keep getty on tty1 out of the way of the serial console we rely on for
+# diagnostics; the recovery shell on tty2 covers the "no GUI" case.
+rm -f "$ROOT/etc/systemd/system/getty.target.wants/getty@tty1.service" 2>/dev/null || true
 
 # agreety (the greeter binary) must exist or greetd exits immediately.
 [ -x "$ROOT/usr/sbin/agreety" ] \

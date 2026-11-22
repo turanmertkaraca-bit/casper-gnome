@@ -220,6 +220,14 @@ has 'Started .*[Gg]nome|gnome-shell|org\.gnome\.Shell'  && have_graphical=1
 has 'Reached target graphical\.target'                 && have_graphical=1
 
 echo "kernel=${have_kernel} userspace=${have_userspace} graphical=${have_graphical}"
+if has 'greetd'; then
+    echo "greetd: seen on console"
+    sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$SERIAL_LOG" | grep -i 'greetd' | head -5
+fi
+if has 'gnome-shell|mutter'; then
+    echo "gnome: seen on console"
+    sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$SERIAL_LOG" | grep -iE 'gnome-shell|mutter' | head -5
+fi
 
 KIND=$(echo "$RESULT" | sed -n 's/.*kind=\([a-z-]*\).*/\1/p')
 
