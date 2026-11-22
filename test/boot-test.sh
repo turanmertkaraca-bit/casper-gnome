@@ -212,9 +212,12 @@ has 'Reached target|Started .*service|systemd\[1\]' && have_userspace=1
 # greetd and gnome-shell specifically, not just graphical.target, because
 # reaching the target can happen with nothing drawing.
 have_graphical=0
-has 'Started greetd|greetd\['                      && have_graphical=1
-has 'Started .*[Gg]nome|gnome-shell|org\.gnome\.Shell' && have_graphical=1
-has 'New seat seat0'                                && have_graphical=1
+# 'New seat seat0' is deliberately NOT counted: it is systemd-logind starting,
+# not a desktop. Counting it made this test report success on an image where
+# greetd never ran at all.
+has 'Started greetd|greetd\['                          && have_graphical=1
+has 'Started .*[Gg]nome|gnome-shell|org\.gnome\.Shell'  && have_graphical=1
+has 'Reached target graphical\.target'                 && have_graphical=1
 
 echo "kernel=${have_kernel} userspace=${have_userspace} graphical=${have_graphical}"
 
@@ -233,6 +236,11 @@ if [ "$have_kernel" = 1 ] && [ "$have_userspace" = 1 ]; then
     echo "        The graphical session did not start within ${WAIT}s."
     echo "        This is real progress but NOT a working desktop."
     # Name the blocker instead of leaving it to guesswork.
+    if ! has 'greetd'; then
+        echo
+        echo "BLOCKER: greetd never started, so no session was launched."
+        echo "         logind is healthy (seat0 exists), so this is greetd, not logind."
+    fi
     if has 'systemd-logind'; then
         echo
         echo "BLOCKER: systemd-logind failed. logind owns seats and sessions, so"

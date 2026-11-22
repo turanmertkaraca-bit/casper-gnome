@@ -181,23 +181,34 @@ EOF
 # greetd requires the greeter user to exist.
 chroot "$ROOT" /bin/sh -c 'id greeter >/dev/null 2>&1 || useradd -r -s /sbin/nologin greeter' || true
 
-# ENABLE greetd. Configuring it is not enough — it is not enabled by default,
-# and without this the image boots to a text login with no graphical session at
-# all (which is exactly what the serial log showed: logind healthy, greetd
-# never mentioned).
-chroot "$ROOT" systemctl enable greetd.service >/dev/null 2>&1 || \
-    info "  note: could not enable greetd here (will verify below)"
-if [ -e "$ROOT/etc/systemd/system/multi-user.target.wants/greetd.service" ] \
-   || [ -e "$ROOT/etc/systemd/system/display-manager.service" ]; then
-    ok "greetd enabled"
+# ENABLE greetd. Configuring it is not enough — without this the image boots to
+# a text login with no graphical session (which is exactly what the serial log
+# showed: logind healthy and seat0 present, greetd never mentioned at all).
+#
+# greetd's unit has NO WantedBy=; it declares Alias=display-manager.service and
+# graphical.target has Wants=display-manager.service. So the correct wiring is
+# the display-manager alias, not multi-user.target.wants — symlinking into
+# multi-user.target.wants starts nothing because the unit has no [Install]
+# WantedBy to satisfy.
+mkdir -p "$ROOT/etc/systemd/system"
+ln -sf /usr/lib/systemd/system/greetd.service \
+    "$ROOT/etc/systemd/system/display-manager.service"
+
+if [ -e "$ROOT/etc/systemd/system/display-manager.service" ]; then
+    ok "greetd wired as display-manager.service"
 else
-    # Fall back to a direct symlink; `systemctl enable` needs a working chroot
-    # dbus in some systemd versions and this is the outcome we actually need.
-    mkdir -p "$ROOT/etc/systemd/system/multi-user.target.wants"
-    ln -sf /usr/lib/systemd/system/greetd.service \
-        "$ROOT/etc/systemd/system/multi-user.target.wants/greetd.service"
-    ok "greetd enabled (via symlink)"
+    die "could not create the display-manager.service alias; no desktop would start"
 fi
+
+# agreety (the greeter binary) must exist or greetd exits immediately.
+[ -x "$ROOT/usr/sbin/agreety" ] \
+    && ok "agreety present" \
+    || die "agreety missing — greetd would exit immediately with no greeter"
+
+# greetd runs as root and needs its PAM service file.
+[ -f "$ROOT/etc/pam.d/greetd" ] \
+    && ok "pam.d/greetd present" \
+    || die "etc/pam.d/greetd missing — greetd cannot authenticate"
 
 # /usr/share/wayland-sessions/gnome.desktop is what tells the world a Wayland
 # GNOME session exists. gnome-session ships it, but assert it: without it
