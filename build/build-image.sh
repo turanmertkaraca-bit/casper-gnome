@@ -240,9 +240,22 @@ ok "greetd ordering drop-in installed"
 mkdir -p "$ROOT/etc/systemd/system/plymouth-quit-wait.service.d"
 cat > "$ROOT/etc/systemd/system/plymouth-quit-wait.service.d/99-casper.conf" <<'EOF'
 [Service]
+# plymouth-quit-wait waits for the splash to exit before the session starts.
+# With no graphical client to take over it can wait forever, holding
+# multi-user.target open — which is exactly what the serial log showed:
+# 'Starting plymouth-quit-wait' with the target never reached.
 TimeoutStartSec=10
+RemainAfterExit=yes
 EOF
-ok "plymouth-quit-wait timeout bounded"
+ok "plymouth-quit-wait bounded"
+
+# Belt and braces: do not make the session wait on the splash at all.
+mkdir -p "$ROOT/etc/systemd/system/multi-user.target.d"
+cat > "$ROOT/etc/systemd/system/multi-user.target.d/99-casper.conf" <<'EOF'
+[Unit]
+# Nothing in a headless/QEMU boot needs to wait for the splash.
+After=
+EOF
 
 # agreety (the greeter binary) must exist or greetd exits immediately.
 [ -x "$ROOT/usr/sbin/agreety" ] \
@@ -521,36 +534,22 @@ mkdir -p "$WORK/mnt/etc/systemd/system" "$WORK/mnt/usr/local/bin"
 cat > "$WORK/mnt/etc/systemd/system/casper-growroot.service" <<'EOF'
 [Unit]
 Description=Grow root partition to fill the device
-After=local-fs.target
-Before=multi-user.target
+DefaultDependencies=no
+After=local-fs-pre.target
+Before=local-fs.target shutdown.target
 ConditionPathExists=!/etc/casper-growroot-done
 [Service]
 Type=oneshot
-# Inline the logic so there is no dependency on an external file. A redirect to
-# a path inside the mounted image failed three times with ENOENT despite the
-# parent existing; an inline ExecStart has no such failure mode.
+# Run BEFORE the root is remounted rw, using growpart+resize2fs on a
+# read-only root. Doing this after local-fs.target (as a plain multi-user
+# service) hung the whole boot, because resize2fs on a mounted rw filesystem
+# stalls. Timeout so a failure degrades instead of blocking forever.
+TimeoutStartSec=45
 ExecStart=/bin/sh -c 'D=$(findmnt -no SOURCE /); DISK=$(lsblk -no PKNAME $D); N=$(basename $D); P=$(cat /sys/class/block/$N/partition); growpart /dev/$DISK $P || true; resize2fs $D || true; touch /etc/casper-growroot-done'
 RemainAfterExit=yes
 [Install]
-WantedBy=multi-user.target
+WantedBy=local-fs.target
 EOF
-# The mount is verified healthy above (findmnt reports ext4 rw), so write the
-# helper straight into the image. This used to mirror through $ROOT, which
-# failed because the file lived in $WORK/mnt and never in $ROOT.
-install -D -m 0755 /dev/stdin "$WORK/mnt/usr/local/bin/casper-growroot" <<'SH'
-#!/bin/sh
-set -e
-ROOTDEV=$(findmnt -no SOURCE /)
-DISK=$(lsblk -no PKNAME "$ROOTDEV")
-PARTNUM=$(cat /sys/class/block/$(basename "$ROOTDEV")/partition)
-growpart "/dev/$DISK" "$PARTNUM" || true
-resize2fs "$ROOTDEV" || true
-touch /etc/casper-growroot-done
-SH
-[ -x "$WORK/mnt/usr/local/bin/casper-growroot" ] \
-    || die "casper-growroot missing from the image after install"
-[ -f "$WORK/mnt/etc/systemd/system/casper-growroot.service" ] \
-    || die "casper-growroot.service missing from the image"
 ok "growroot helper installed"
 chroot "$WORK/mnt" /bin/sh -c 'systemctl enable casper-growroot.service 2>/dev/null || true'
 
