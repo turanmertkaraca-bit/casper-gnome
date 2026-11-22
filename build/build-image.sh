@@ -220,6 +220,30 @@ rm -f "$ROOT/etc/systemd/system/multi-user.target.wants/getty@tty7.service" 2>/d
 # diagnostics; the recovery shell on tty2 covers the "no GUI" case.
 rm -f "$ROOT/etc/systemd/system/getty.target.wants/getty@tty1.service" 2>/dev/null || true
 
+# greetd shows "inactive (dead)" with a pending Job number even though it is
+# enabled and aliased, because its packaged unit orders
+# After=plymouth-quit-wait.service and then After=/Conflicts=getty@tty7. If the
+# splash never exits (no graphical client to hand off to) the start job stays
+# queued forever. Relax that ordering via a drop-in.
+mkdir -p "$ROOT/etc/systemd/system/greetd.service.d"
+cat > "$ROOT/etc/systemd/system/greetd.service.d/99-casper.conf" <<'EOF'
+[Unit]
+After=
+After=systemd-user-sessions.service plymouth-quit.service getty@tty7.service
+
+[Service]
+TimeoutStartSec=60
+EOF
+ok "greetd ordering drop-in installed"
+
+# Never let the splash hold up the session.
+mkdir -p "$ROOT/etc/systemd/system/plymouth-quit-wait.service.d"
+cat > "$ROOT/etc/systemd/system/plymouth-quit-wait.service.d/99-casper.conf" <<'EOF'
+[Service]
+TimeoutStartSec=10
+EOF
+ok "plymouth-quit-wait timeout bounded"
+
 # agreety (the greeter binary) must exist or greetd exits immediately.
 [ -x "$ROOT/usr/sbin/agreety" ] \
     && ok "agreety present" \
